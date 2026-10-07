@@ -4,13 +4,13 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 ## Current status
 
-The first fixture iteration is implemented. It compares quarterly revenue actuals with broker estimates, optionally calculates YoY growth, and retrieves curated growth passages. This is **fixture execution**, with no LLM or database calls. Keyword and semantic retrieval are later capabilities and currently return an explicit unavailable error.
+The first fixture iteration compares quarterly revenue actuals with broker estimates, optionally calculates YoY growth, and retrieves curated growth passages. Analytics remains **fixture execution**. Optional Groq execution selects verified growth passages by reference; the application returns canonical source quotes and deterministic calculations. Database and semantic retrieval are later capabilities.
 
 Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
 ## Run
 
-Python 3.10 or later is required. The calculator uses the standard library; the fixture adapter uses `pdfplumber` to verify evidence against the original PDF.
+Python 3.10 or later is required. The calculator uses the standard library; `pdfplumber` verifies original PDF evidence. The official Groq SDK handles live provider requests with bounded timeouts and no automatic retries; `python-dotenv` reads explicitly selected credential files without executing shell text.
 
 ```sh
 python3 -m venv .venv
@@ -37,7 +37,18 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
   "By how much did Example Pharma's 1QFY27 revenue exceed the broker estimate?"
 ```
 
-Mixed or unsupported questions are refused as a whole. The CLI does not answer a recognized subset while ignoring another company, metric, period or intent. Exit codes: `0` answered, `1` refused, `2` invalid configuration or source fixture. Live, keyword and semantic requests never fall back silently to fixture execution.
+Mixed or unsupported questions are refused as a whole. The CLI does not answer a recognized subset while ignoring another company, metric, period or intent. Exit codes: `0` answered, `1` refused, `2` invalid configuration, source or provider execution. Unavailable capabilities never fall back silently to fixture execution.
+
+## Optional Groq selection
+
+Use `--llm groq` for `growth` or `combined`. Set `GROQ_API_KEY` in your environment, or pass `--env-file` with a private environment file. Keep credentials out of commands, fixtures and commits. The default model is `openai/gpt-oss-20b`; `--groq-model` chooses an explicit model that must support structured outputs.
+
+```sh
+python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
+  --llm groq --format json combined --company "Example Pharma" --period 1QFY27
+```
+
+Output labels fixture analytics, curated fixture retrieval and the actual live Groq call separately. Injected clients are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. This is bounded evidence selection, not a general agent or semantic retrieval implementation.
 
 ## Intended behavior
 
@@ -50,7 +61,7 @@ Data sources, execution modes, and retrieval capabilities must be labeled accura
 
 ## Boundaries and current limits
 
-Source lookup stays in adapters; the revenue comparator is pure. `AnalyticsReadPort` will connect to a user-owned database through a read-only adapter. This repository contains no database schema, SQL, migrations or database engine.
+Source lookup stays in adapters; the revenue comparator is pure. SQLite persistence and validated ingestion are planned behind adapters. No database is connected in this checkpoint.
 
 This iteration validates manually reviewed source bindings and retrieves curated passages. It does not extract arbitrary PDFs, perform a general semantic assessment, or guarantee that an entire corpus lacks an answer. A growth explanation does not establish the cause or product contribution of an estimate beat. Conflicting fiscal year-end labels remain visible; calendar dates are not inferred.
 

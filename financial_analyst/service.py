@@ -9,6 +9,7 @@ from typing import Any
 
 from .adapters import AnalyticsReadPort, Citation, EvidenceError, EvidenceReadPort, PassageReadPort
 from .analytics import ComparisonError, RevenueComparison, RevenueObservation, compare_revenue
+from .selection import PassageSelectionPort, SelectionError, validate_selection
 
 
 @dataclass(frozen=True)
@@ -31,15 +32,24 @@ class Answer:
 
 class ApplicationService:
     def __init__(self, analytics: AnalyticsReadPort, evidence: EvidenceReadPort,
-                 passages: PassageReadPort | None = None):
+                 passages: PassageReadPort | None = None, selector: PassageSelectionPort | None = None):
         self.analytics = analytics
         self.evidence = evidence
         self.passages = passages
+        self.selector = selector
+        self._begin_request()
+
+    def _begin_request(self) -> None:
+        self._retrieval_used = False
+        self._llm_execution = {"provider": "none", "mode": "not_called"}
 
     def _execution(self, growth: bool = False) -> dict[str, Any]:
+        llm = dict(self._llm_execution)
         return {"mode": "fixture", "analytics": "fixture",
-                "retrieval": "curated_fixture" if growth else "not_requested",
-                "no_llm": True, "no_database": True}
+                "retrieval": "curated_fixture" if self._retrieval_used else "not_requested",
+                "llm": llm, "database": "none",
+                "selection_executed": llm["mode"] in {"live", "test_double"},
+                "no_llm": llm["mode"] != "live", "no_database": True}
 
     def _conflicts(self) -> tuple[dict, ...]:
         return tuple(getattr(self.evidence, "source_conflicts", ()))
@@ -53,6 +63,7 @@ class ApplicationService:
                       source_conflicts=self._conflicts())
 
     def refuse_calendar_dates(self) -> Answer:
+        self._begin_request()
         return self.refuse("The source has conflicting fiscal year-end labels. Calendar dates cannot be resolved from this fixture; the original fiscal labels are preserved.")
 
     def _one(self, company: str, period: str, kind: str) -> RevenueObservation:
@@ -65,24 +76,34 @@ class ApplicationService:
         self.evidence.validate_observation(matches[0])
         return matches[0]
 
-    def _growth_claims(self, company: str, period: str) -> tuple[Claim, ...]:
+    def _growth_claims(self, company: str, period: str, select: bool = True) -> tuple[Claim, ...]:
         if self.passages is None:
             raise EvidenceError("Curated growth passage retrieval is unavailable.")
+        self._retrieval_used = True
         passages = self.passages.growth_passages(company, period)
         if not passages:
             raise EvidenceError("Fixture has no cited revenue-growth explanations for this quarter.")
-        claims = []
+        verified = []
         for passage in passages:
             # Resolve again through the evidence port. Retrieval cannot supply a
             # different excerpt under an otherwise valid citation identifier.
             supported = self.evidence.resolve(passage.ref)
             if supported != passage:
                 raise EvidenceError("Retrieved growth passage conflicts with its source evidence.")
-            claims.append(Claim("growth", {"attribution": "broker", "excerpt": supported.excerpt}, (supported.ref,)))
-        return tuple(claims)
+            verified.append(supported)
+        if self.selector is not None and select:
+            try:
+                refs = validate_selection(self.selector.select(company, period, tuple(verified)), verified)
+            finally:
+                self._llm_execution = dict(self.selector.execution)
+            by_ref = {passage.ref: passage for passage in verified}
+            verified = [by_ref[ref] for ref in refs]
+        return tuple(Claim("growth", {"attribution": "broker", "excerpt": passage.excerpt}, (passage.ref,))
+                     for passage in verified)
 
     def comparison_answer(self, company: str, period: str, include_growth: bool = False,
                           include_yoy: bool = False) -> Answer:
+        self._begin_request()
         if not re.fullmatch(r"[1-4]QFY(?:\d{2}|\d{4})", period):
             return self.refuse("This fixture requires an explicit fiscal-quarter label; calendar-period interpretation is unsupported.")
         try:
@@ -115,22 +136,24 @@ class ApplicationService:
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             return Answer("answered", tuple(claims), result, self._citations(refs),
                           self._execution(include_growth), source_conflicts=self._conflicts())
-        except (EvidenceError, ComparisonError) as exc:
+        except (EvidenceError, ComparisonError, SelectionError) as exc:
             return self.refuse(str(exc))
 
     def growth_answer(self, company: str, period: str) -> Answer:
+        self._begin_request()
         try:
             self._one(company, period, "reported_actual")
             claims = self._growth_claims(company, period)
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             return Answer("answered", claims, citations=self._citations(refs),
                           execution=self._execution(True), source_conflicts=self._conflicts())
-        except (EvidenceError, ComparisonError) as exc:
+        except (EvidenceError, ComparisonError, SelectionError) as exc:
             return self.refuse(str(exc))
 
     def refuse_beat_attribution(self, company: str, period: str, driver: str | None = None) -> Answer:
+        self._begin_request()
         try:
-            claims = self._growth_claims(company, period)
+            claims = self._growth_claims(company, period, select=False)
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             reason = "This fixture has no supported allocation of the estimate variance to individual drivers. The cited passages describe revenue growth and cannot allocate the comparison amount."
             return Answer("refused", citations=self._citations(refs), execution=self._execution(True),

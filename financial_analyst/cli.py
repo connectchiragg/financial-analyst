@@ -1,4 +1,4 @@
-"""CLI for the approved fixture slice; provider integrations remain adapters."""
+"""Source-backed CLI; local data and live provider execution are explicit."""
 
 import argparse
 from dataclasses import asdict, is_dataclass
@@ -45,7 +45,10 @@ def _citation_text(refs, citations):
 
 def _render_text(answer):
     retrieval = answer.execution.get("retrieval", "not_requested").replace("_", " ")
-    lines = [f"Execution: fixture; retrieval: {retrieval}; LLM: none; database: none."]
+    llm = answer.execution.get("llm", {"mode": "not_called"})
+    llm_label = "none" if llm["mode"] == "not_called" else f"{llm['mode']} {llm['provider']} ({llm['model']})"
+    lines = [f"Execution: {answer.execution.get('mode', 'fixture')}; analytics: fixture; "
+             f"retrieval: {retrieval}; LLM: {llm_label}; database: none."]
     if answer.status != "answered":
         lines.append(f"Refused: {answer.reason}")
         if answer.citations:
@@ -102,6 +105,9 @@ def _parser():
     parser.add_argument("--source-pdf", type=Path, help="Optional relocation of the fixture's hash-matched PDF.")
     parser.add_argument("--retrieval", choices=("fixture", "keyword", "semantic"), default="fixture")
     parser.add_argument("--format", choices=("text", "json"), default="text")
+    parser.add_argument("--llm", choices=("none", "groq"), default="none", help="Optional live selection of verified growth passages.")
+    parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use GROQ_API_KEY from the environment.")
+    parser.add_argument("--groq-model", default="openai/gpt-oss-20b", help="Explicit model for Groq evidence selection.")
     commands = parser.add_subparsers(dest="command", required=True)
     for name in ("compare", "combined", "growth", "ask", "beat-attribution"):
         command = commands.add_parser(name)
@@ -124,6 +130,7 @@ def main(argv=None):
     if args.fixture is None:
         parser.error("--fixture is required in fixture mode.")
 
+    selector = None
     try:
         operation, include_yoy = args.command, getattr(args, "yoy", False)
         if operation == "ask":
@@ -134,7 +141,12 @@ def main(argv=None):
         from .service import ApplicationService
 
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
-        service = ApplicationService(fixture, fixture, fixture)
+        if args.llm == "groq" and operation in ("growth", "combined"):
+            from .selection import GroqPassageSelector, load_groq_key
+            selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
+        elif args.llm == "groq" and operation == "compare":
+            raise ValueError("Groq selection requires a growth or combined request; no model call was performed.")
+        service = ApplicationService(fixture, fixture, fixture, selector=selector)
         if operation == "growth":
             answer = service.growth_answer(args.company, args.period)
         elif operation in ("beat-attribution", "beat_attribution"):
@@ -149,9 +161,12 @@ def main(argv=None):
         }}
         print(json.dumps(result, indent=2) if args.format == "json" else f"Execution: fixture; LLM: none; database: none.\nRefused: {error}")
         return 1
-    except (ValueError, OSError, ImportError) as error:
+    except (ValueError, OSError, ImportError, RuntimeError) as error:
         print(f"Fixture execution failed: {error}", file=sys.stderr)
         return 2
+    finally:
+        if selector is not None:
+            selector.close()
 
     print(json.dumps(_json_value(answer), indent=2, ensure_ascii=False) if args.format == "json" else _render_text(answer))
     return 0 if answer.status == "answered" else 1
