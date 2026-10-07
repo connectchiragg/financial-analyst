@@ -51,7 +51,7 @@ class SemanticRetrievalTests(unittest.TestCase):
         self.assertEqual([hit.record.ref for hit in hits], ["portfolio"])
         self.assertEqual(selector.query, query)
         self.assertEqual({passage.ref for passage in selector.calls[0][2]}, {"growth", "portfolio"})
-        self.assertEqual(retriever.mode, "groq_semantic_selection")
+        self.assertEqual(retriever.mode, "llm_semantic_selection")
         self.assertEqual(retriever.execution["mode"], "test_double")
 
     def test_exact_filters_reject_wrong_company_period_and_kind_before_a_call(self):
@@ -146,7 +146,7 @@ class SemanticRetrievalTests(unittest.TestCase):
         client = FakeClient({"abstain": False, "selected_refs": ["portfolio"]})
         selector = GroqPassageSelector(client=client)
         retriever = SemanticKnowledgeRetriever(index, selector)
-        with self.assertRaisesRegex(SelectionError, "bounded Groq request size"):
+        with self.assertRaisesRegex(SelectionError, "bounded inference request size"):
             retriever.search("reasons", "Example Pharma", "1QFY27", kind="broker_commentary")
         self.assertEqual(client.calls, [])
         self.assertEqual(retriever.execution["mode"], "not_called")
@@ -172,7 +172,7 @@ class SemanticRetrievalTests(unittest.TestCase):
         self.assertEqual({item.ref for item in selector.calls[0][2]}, {"portfolio", "growth"})
         self.assertTrue(all("kind=broker_commentary" in prefix for prefix in selector.contexts.values()))
         self.assertEqual(adapter.source_sha256, self.fixture.source_sha256)
-        self.assertEqual(adapter.mode, "groq_semantic_selection")
+        self.assertEqual(adapter.mode, "llm_semantic_selection")
         self.assertEqual(adapter.execution["mode"], "test_double")
 
     def test_semantic_query_and_result_limits_fail_before_a_call(self):

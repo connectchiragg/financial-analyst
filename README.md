@@ -4,13 +4,13 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 ## Current status
 
-Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional live Groq selects references; the application returns canonical source quotes and deterministic calculations. A general tool-using agent is a later capability.
+Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional inference selects references through a provider-neutral port; the application returns canonical source quotes and deterministic calculations. A general tool-using agent is a later capability.
 
 Local keyword search explores hash-verified PDFs and returns exact page passages with lexical scores and citations. Its raw passages have no reviewed financial context and do not enter calculated answers. Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
 ## Run
 
-Python 3.10 or later is required. The calculator uses the standard library; `pdfplumber` verifies original PDF evidence. The official Groq SDK handles live provider requests with bounded timeouts and no automatic retries; `python-dotenv` reads explicitly selected credential files without executing shell text.
+Python 3.10 or later is required. The calculator uses the standard library; `pdfplumber` verifies original PDF evidence. The Groq adapter uses its official SDK; Mistral and compatible endpoint adapters use HTTPX. Provider requests have bounded timeouts and no automatic retries; `python-dotenv` reads explicitly selected credential files without executing shell text.
 
 ```sh
 python3 -m venv .venv
@@ -39,16 +39,30 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
 
 Mixed or unsupported questions are refused as a whole. The CLI does not answer a recognized subset while ignoring another company, metric, period or intent. Exit codes: `0` answered, `1` refused, `2` invalid configuration, source or provider execution. Unavailable capabilities never fall back silently to fixture execution.
 
-## Optional Groq selection
+## Interchangeable inference
 
-Use `--llm groq` for `growth` or `combined`. Set `GROQ_API_KEY` in your environment, or pass `--env-file` with a private environment file. Keep credentials out of commands, fixtures and commits. The default model is `openai/gpt-oss-20b`; `--groq-model` chooses an explicit model that must support structured outputs.
+Use `--llm mistral` for `growth`, `combined` or semantic retrieval. Set `MISTRAL_API_KEY` in the environment, or pass `--env-file` with a private credential file. The default Mistral model is `mistral-small-latest`; `--model` selects an explicit model. Keep credentials out of commands, fixtures and commits.
 
 ```sh
 python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
-  --llm groq --format json combined --company "Example Pharma" --period 1QFY27
+  --llm mistral --format json combined --company "Example Pharma" --period 1QFY27
 ```
 
-Output labels fixture analytics, curated fixture retrieval and the actual live Groq call separately. Injected clients are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. This selector performs bounded evidence selection. The semantic adapter below adds query-based retrieval after context filters; a general tool-using agent remains pending.
+Selection and retrieval consume a standard `InferencePort`: neutral messages, a named JSON schema and an output-token budget in; content and finish reason out. Provider adapters own wire formats, credentials, model IDs, timeouts, errors and cleanup. Financial services and the calculator do not consume provider SDK objects. Other API formats can implement this port without editing financial logic.
+
+Switch to `--llm groq` for its existing adapter (default `openai/gpt-oss-20b`, credential `GROQ_API_KEY`). The old `--groq-model` flag remains a Groq-only alias for `--model`. Or configure an explicit compatible endpoint:
+
+```sh
+python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
+  --llm openai-compatible --model provider-model --base-url https://provider.example/v1 \
+  --api-key-env PROVIDER_API_KEY combined --company "Example Pharma" --period 1QFY27
+```
+
+The compatible adapter appends `/chat/completions` to the API base URL and uses `max_tokens` with strict `json_schema`. The endpoint/model must support that contract. Incompatible responses fail explicitly without downgrading the schema, switching providers, retrying or silently falling back. Endpoints require HTTPS, or HTTP on loopback for local inference. Redirects cannot forward credentials. Its default credential variable is `INFERENCE_API_KEY`.
+
+Output labels fixture/SQLite analytics, actual retrieval method, provider/model and actual inference invocation separately. Injected transports are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. The semantic adapter below adds query-based retrieval after context filters.
+
+Provider-swap tests verify unchanged arithmetic, canonical quotes, citations and refusals across synthetic provider implementations. Mistral transport is tested with synthetic HTTP responses; live Mistral execution awaits a configured credential. Mistral hosted Libraries and Agents/Conversations integration are a separate pending increment, not part of this inference adapter.
 
 ## Exploratory keyword search
 
@@ -77,11 +91,11 @@ For `growth` and `combined`, `--retrieval keyword` uses this filtered index inst
 
 ## Bounded semantic retrieval
 
-Use `--retrieval semantic --llm groq` with `kb-search`, `growth` or `combined`. All exact metadata filters run first; Groq sees every eligible record within the explicit budget and judges relevance by meaning. There is no keyword prefilter, embedding API or vector index. This method suits small reviewed candidate sets; exceeding 32 candidates or the 16,000-character provider request budget fails explicitly without truncating evidence or falling back.
+Use `--retrieval semantic --llm mistral` with `kb-search`, `growth` or `combined`. All exact metadata filters run first; The configured inference provider sees every eligible record within the explicit budget and judges relevance by meaning. There is no keyword prefilter, embedding API or vector index. This method suits small reviewed candidate sets; exceeding 32 candidates or the 16,000-character provider request budget fails explicitly without truncating evidence or falling back.
 
 ```sh
 python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
-  --retrieval semantic --llm groq kb-search "What helped turnover expand?" \
+  --retrieval semantic --llm mistral kb-search "What helped turnover expand?" \
   --company "Example Pharma" --period 1QFY27 --metric net_sales --kind broker_commentary
 ```
 

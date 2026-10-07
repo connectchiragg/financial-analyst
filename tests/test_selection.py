@@ -101,7 +101,7 @@ class SelectionTests(unittest.TestCase):
     def test_transport_cleanup_preserves_a_completed_answer(self):
         selector, client = self.selector({"abstain": False, "selected_refs": ["growth"]})
         client.close = lambda: (_ for _ in ()).throw(OSError("private transport detail"))
-        selector._owns_client = True
+        selector.inference._owns_client = True
         selector.select("Example Pharma", "1QFY27", self.passages)
         selector.close()
         self.assertEqual(selector.execution["outcome"], "validated")

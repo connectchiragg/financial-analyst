@@ -25,8 +25,7 @@ class SemanticCliTests(unittest.TestCase):
         client = FakeClient(response)
         stdout, stderr = io.StringIO(), io.StringIO()
         selector = GroqPassageSelector(client=client)
-        with patch("financial_analyst.selection.load_groq_key", return_value="synthetic-credential"), \
-             patch("financial_analyst.selection.GroqPassageSelector", return_value=selector), \
+        with patch("financial_analyst.cli._create_selector", return_value=selector), \
              redirect_stdout(stdout), redirect_stderr(stderr):
             code = main(arguments)
         return code, stdout.getvalue(), stderr.getvalue(), client
@@ -44,7 +43,7 @@ class SemanticCliTests(unittest.TestCase):
         self.assertEqual(code, 0, error)
         result = json.loads(output)
         self.assertEqual(result["status"], "retrieved")
-        self.assertEqual(result["execution"]["retrieval"], "groq_semantic_selection")
+        self.assertEqual(result["execution"]["retrieval"], "llm_semantic_selection")
         self.assertEqual(result["execution"]["llm"]["mode"], "test_double")
         self.assertTrue(result["execution"]["no_llm"])
         self.assertEqual(result["hits"][0]["rank"], 1)
@@ -61,7 +60,7 @@ class SemanticCliTests(unittest.TestCase):
         answer = json.loads(output)
         self.assertEqual(answer["status"], "answered")
         self.assertEqual(answer["claims"][0]["values"]["delta"], "20")
-        self.assertEqual(answer["execution"]["retrieval"], "groq_semantic_selection")
+        self.assertEqual(answer["execution"]["retrieval"], "llm_semantic_selection")
         self.assertTrue(answer["execution"]["selection_executed"])
         refs = {citation["ref"] for citation in answer["citations"]}
         self.assertTrue(all(set(claim["evidence_refs"]) <= refs for claim in answer["claims"]))

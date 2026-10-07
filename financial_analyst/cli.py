@@ -107,9 +107,13 @@ def _parser():
     parser.add_argument("--source-pdf", type=Path, help="Optional relocation of the fixture's hash-matched PDF.")
     parser.add_argument("--retrieval", choices=("fixture", "keyword", "semantic"), default="fixture")
     parser.add_argument("--format", choices=("text", "json"), default="text")
-    parser.add_argument("--llm", choices=("none", "groq"), default="none", help="Optional live selection of verified growth passages.")
-    parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use GROQ_API_KEY from the environment.")
-    parser.add_argument("--groq-model", default="openai/gpt-oss-20b", help="Explicit model for Groq evidence selection.")
+    parser.add_argument("--llm", choices=("none", "groq", "mistral", "openai-compatible"), default="none",
+                        help="Optional inference provider for verified evidence selection.")
+    parser.add_argument("--model", help="Model used by the selected inference provider.")
+    parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use the selected provider's environment variable.")
+    parser.add_argument("--api-key-env", help="Credential variable name (default: GROQ_API_KEY, MISTRAL_API_KEY or INFERENCE_API_KEY).")
+    parser.add_argument("--base-url", help="Explicit API base URL for an OpenAI-compatible provider.")
+    parser.add_argument("--groq-model", help="Compatibility alias for --model when --llm groq is selected.")
     parser.add_argument("--manifest", type=Path, help="Hash-pinned local research PDF manifest for exploratory search.")
     parser.add_argument("--database", type=Path, help="Local SQLite file for ingestion or live relational analytics.")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -135,6 +139,42 @@ def _parser():
     return parser
 
 
+def _provider_config(args):
+    """Resolve CLI configuration without constructing a client or reading secrets."""
+    model = args.model
+    if args.groq_model is not None:
+        if args.llm != "groq":
+            raise ValueError("--groq-model requires --llm groq; use --model for other providers.")
+        if model is not None and model != args.groq_model:
+            raise ValueError("--model and --groq-model disagree; select one model.")
+        model = args.groq_model
+    if args.llm == "none":
+        if any(value is not None for value in (model, args.base_url, args.api_key_env, args.env_file)):
+            raise ValueError("Inference configuration requires an explicit --llm provider; no fallback was performed.")
+    elif args.llm == "openai-compatible":
+        if not model or not args.base_url:
+            raise ValueError("--llm openai-compatible requires explicit --model and --base-url; no fallback was performed.")
+    elif args.base_url is not None:
+        raise ValueError("--base-url requires --llm openai-compatible; no fallback was performed.")
+    return {"model": model, "env_file": args.env_file, "api_key_env": args.api_key_env,
+            "base_url": args.base_url, "timeout": 20}
+
+
+def _create_selector(args):
+    from .inference import create_inference
+    from .selection import PassageSelector
+
+    inference = create_inference(args.llm, **_provider_config(args))
+    try:
+        return PassageSelector(inference)
+    except Exception:
+        try:
+            inference.close()
+        except Exception:
+            pass
+        raise
+
+
 def _search(args, parser):
     if args.mode != "local" or args.retrieval != "keyword":
         parser.error("Exploratory search requires --mode local --retrieval keyword; no fallback was performed.")
@@ -143,6 +183,7 @@ def _search(args, parser):
     if args.llm != "none":
         parser.error("Exploratory keyword search does not invoke an LLM; no fallback was performed.")
     try:
+        _provider_config(args)
         from .retrieval import LocalKeywordAdapter
         adapter = LocalKeywordAdapter(args.manifest)
         hits = adapter.search(args.query, args.limit)
@@ -174,12 +215,13 @@ def _knowledge_search(args, parser):
         parser.error("Reviewed knowledge search requires --mode fixture, --fixture and keyword/semantic retrieval; no fallback was performed.")
     if args.database is not None:
         parser.error("Reviewed knowledge search uses source-validated fixture records; no database read was performed.")
-    if args.retrieval == "semantic" and args.llm != "groq":
-        parser.error("Semantic retrieval requires explicit --llm groq; no fallback was performed.")
+    if args.retrieval == "semantic" and args.llm == "none":
+        parser.error("Semantic retrieval requires an explicit --llm provider; no fallback was performed.")
     if args.retrieval == "keyword" and args.llm != "none":
         parser.error("Keyword knowledge search does not invoke an LLM; no fallback was performed.")
     selector = None
     try:
+        _provider_config(args)
         from .adapters import FileFixtureAdapter
         from .knowledge import ReviewedKnowledgeIndex
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
@@ -187,9 +229,8 @@ def _knowledge_search(args, parser):
         filters = {name: getattr(args, name) for name in ("company", "period", "scope", "metric", "kind", "currency", "unit")}
         retriever = index
         if args.retrieval == "semantic":
-            from .selection import GroqPassageSelector, load_groq_key
             from .semantic import SemanticKnowledgeRetriever
-            selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
+            selector = _create_selector(args)
             retriever = SemanticKnowledgeRetriever(index, selector)
         hits = retriever.search(args.query, **filters, limit=args.limit)
         llm = dict(retriever.execution) if selector is not None else {"provider": "none", "mode": "not_called"}
@@ -227,6 +268,7 @@ def _ingest(args, parser):
     if args.llm != "none":
         parser.error("Reviewed-bundle ingestion does not invoke an LLM.")
     try:
+        _provider_config(args)
         from .adapters import FileFixtureAdapter
         from .sqlite_adapter import DocumentRecord, SQLiteStore
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
@@ -267,8 +309,8 @@ def main(argv=None):
         parser.error("Select --mode live to read SQLite; no fallback was performed.")
     if args.retrieval != "fixture" and args.command not in {"growth", "combined", "ask"}:
         parser.error("Keyword/semantic answer retrieval requires growth or combined intent; no fallback was performed.")
-    if args.retrieval == "semantic" and args.llm != "groq":
-        parser.error("Semantic retrieval requires explicit --llm groq; no fallback was performed.")
+    if args.retrieval == "semantic" and args.llm == "none":
+        parser.error("Semantic retrieval requires an explicit --llm provider; no fallback was performed.")
     if args.fixture is None:
         parser.error("--fixture is required for original PDF evidence validation.")
 
@@ -280,6 +322,9 @@ def main(argv=None):
             operation, include_yoy = plan.operation, include_yoy or plan.include_yoy
         if args.retrieval != "fixture" and operation not in {"growth", "combined"}:
             raise ValueError("Keyword/semantic answer retrieval requires growth or combined intent; no fallback was performed.")
+        _provider_config(args)
+        if args.llm != "none" and operation == "compare":
+            raise ValueError("Inference selection requires a growth or combined request; no model call was performed.")
 
         from .adapters import FileFixtureAdapter
         from .service import ApplicationService
@@ -293,11 +338,8 @@ def main(argv=None):
         if args.mode == "live":
             from .sqlite_adapter import SQLiteAnalyticsAdapter
             analytics = SQLiteAnalyticsAdapter(args.database, source_sha256=fixture.source_sha256)
-        if args.llm == "groq" and operation in ("growth", "combined"):
-            from .selection import GroqPassageSelector, load_groq_key
-            selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
-        elif args.llm == "groq" and operation == "compare":
-            raise ValueError("Groq selection requires a growth or combined request; no model call was performed.")
+        if args.llm != "none" and operation in ("growth", "combined"):
+            selector = _create_selector(args)
         if args.retrieval == "semantic":
             from .semantic import SemanticGrowthAdapter
             passages = SemanticGrowthAdapter(fixture, selector)

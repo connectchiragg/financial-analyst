@@ -41,7 +41,7 @@ class SemanticKnowledgeRetriever:
     Explicit result limits apply only after ordered selection, not to candidates.
     """
 
-    mode = "groq_semantic_selection"
+    mode = "llm_semantic_selection"
 
     def __init__(self, index: ReviewedKnowledgeIndex, selector: PassageSelectionPort):
         self.index = index
@@ -100,7 +100,7 @@ class SemanticKnowledgeRetriever:
 class SemanticGrowthAdapter:
     """Select only the requested quarter's reviewed broker growth commentary."""
 
-    mode = "groq_semantic_selection"
+    mode = "llm_semantic_selection"
 
     def __init__(self, fixture: FileFixtureAdapter, selector: PassageSelectionPort):
         self._fixture = fixture

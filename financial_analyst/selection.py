@@ -1,13 +1,16 @@
-"""Select canonical evidence; provider output never supplies financial claims."""
+"""Select canonical evidence; inference output never supplies financial claims."""
 
 from __future__ import annotations
 
 import json
-import math
 from pathlib import Path
 from typing import Any, Protocol, Sequence
 
 from .adapters import Evidence
+from .inference import (
+    GroqInference, InferenceError, InferenceMessage, InferencePort, InferenceRequest,
+    ProviderError, load_api_key,
+)
 
 
 class SelectionError(ValueError):
@@ -18,29 +21,20 @@ class SelectionAbstention(SelectionError):
     """The selector returned no supported evidence for the request."""
 
 
-class ProviderError(RuntimeError):
-    """The configured provider failed; no fallback is permitted."""
-
-
 class PassageSelectionPort(Protocol):
     execution: dict[str, Any]
+    query: str | None
+    contexts: dict[str, str]
 
     def select(self, company: str, period: str, passages: Sequence[Evidence]) -> tuple[str, ...]: ...
 
 
 def load_groq_key(env_file: Path | None = None) -> str:
-    """Read one configured credential without copying it or executing shell text."""
-    if env_file is None:
-        import os
-        key = os.environ.get("GROQ_API_KEY")
-    else:
-        if not env_file.is_file():
-            raise SelectionError("The selected credential file is unavailable.")
-        from dotenv import dotenv_values
-        key = dotenv_values(env_file, interpolate=False).get("GROQ_API_KEY")
-    if not isinstance(key, str) or not key.strip():
-        raise SelectionError("GROQ_API_KEY is not configured in the selected credential source.")
-    return key.strip()
+    """Compatibility entry point; credential handling belongs to inference."""
+    try:
+        return load_api_key("GROQ_API_KEY", env_file)
+    except InferenceError as exc:
+        raise SelectionError(str(exc)) from None
 
 
 def validate_selection(refs: Sequence[str], passages: Sequence[Evidence]) -> tuple[str, ...]:
@@ -57,47 +51,36 @@ def validate_selection(refs: Sequence[str], passages: Sequence[Evidence]) -> tup
     return tuple(refs)
 
 
-class GroqPassageSelector:
-    """A live Groq adapter, or an explicitly labeled injected test client."""
+class PassageSelector:
+    """Provider-independent selection policy over a standard inference port."""
 
-    def __init__(self, api_key: str | None = None, model: str = "openai/gpt-oss-20b",
-                 timeout: float = 20, client=None, query: str | None = None,
+    def __init__(self, inference: InferencePort, query: str | None = None,
                  contexts: dict[str, str] | None = None):
-        if not isinstance(model, str) or not model.strip() or len(model) > 128:
-            raise SelectionError("A bounded, explicit Groq model ID is required.")
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 60:
-            raise SelectionError("Groq timeout must be between zero and 60 seconds.")
-        self.model = model
+        self.inference = inference
         self.query = query
         self.contexts = contexts if contexts is not None else {}
-        self._owns_client = client is None
-        self._mode = "live" if client is None else "test_double"
-        self._api_errors = (OSError, TimeoutError)
-        if client is None:
-            if not isinstance(api_key, str) or not api_key.strip():
-                raise SelectionError("GROQ_API_KEY is required for live Groq execution.")
-            from groq import APIError, Groq
-            self._api_errors += (APIError,)
-            client = Groq(api_key=api_key, timeout=timeout, max_retries=0)
-        self._client = client
-        self.execution = {"provider": "groq", "model": model, "mode": "not_called"}
+        self.execution = self._not_called()
+
+    def _not_called(self) -> dict[str, Any]:
+        return {"provider": self.inference.provider, "model": self.inference.model, "mode": "not_called"}
 
     def close(self) -> None:
-        if self._owns_client:
-            try:
-                self._client.close()
-            except Exception:
-                # Cleanup must not replace a validated answer or a primary error.
-                pass
+        try:
+            self.inference.close()
+        except Exception:
+            # Cleanup must not replace a validated answer or a primary error.
+            pass
 
     def select(self, company: str, period: str, passages: Sequence[Evidence]) -> tuple[str, ...]:
-        self.execution = {"provider": "groq", "model": self.model, "mode": "not_called"}
+        self.execution = self._not_called()
+        if "json_schema" not in self.inference.capabilities:
+            raise SelectionError("Configured inference does not support the required JSON-schema contract.")
         if not isinstance(company, str) or not company.strip() or len(company) > 256:
             raise SelectionError("A bounded company identity is required for evidence selection.")
         if not isinstance(period, str) or not period.strip() or len(period) > 64:
             raise SelectionError("A bounded fiscal period is required for evidence selection.")
         if not passages or len(passages) > 32:
-            raise SelectionError("Groq selection requires between one and 32 validated passages.")
+            raise SelectionError("Evidence selection requires between one and 32 validated passages.")
         refs = [passage.ref for passage in passages]
         if any(not isinstance(ref, str) or not ref or len(ref) > 128 for ref in refs) or len(set(refs)) != len(refs):
             raise SelectionError("Validated passage identities are missing or ambiguous.")
@@ -115,7 +98,7 @@ class GroqPassageSelector:
         content = json.dumps({"company": company, "period": period, "query": self.query,
                               "passages": candidate_data}, ensure_ascii=False)
         if len(content) > 16000:
-            raise SelectionError("Validated passages exceed the bounded Groq request size.")
+            raise SelectionError("Validated passages exceed the bounded inference request size.")
         instruction = (
             "Select passages that explain the broker's REPORTED REVENUE GROWTH for the requested company "
             "and fiscal period. Preserve every distinct supported growth explanation. "
@@ -129,48 +112,52 @@ class GroqPassageSelector:
             "Return references only. Do not infer contribution to a beat versus estimate, calculate amounts, "
             "write claims, or use outside knowledge. If no passage supports the request, abstain with an empty selection."
         )
-        payload = {
-            "model": self.model, "temperature": 0, "max_completion_tokens": 1024,
-            "messages": [
-                {"role": "system", "content": instruction},
-                {"role": "user", "content": content},
-            ],
-            "response_format": {"type": "json_schema", "json_schema": {
-                "name": "evidence_selection", "strict": True,
-                "schema": {"type": "object", "properties": {
-                    "abstain": {"type": "boolean"},
-                    "selected_refs": {"type": "array", "items": {"type": "string", "enum": refs}},
-                }, "required": ["abstain", "selected_refs"], "additionalProperties": False},
-            }},
-        }
-        self.execution = {"provider": "groq", "model": self.model, "mode": self._mode, "outcome": "attempted"}
+        request = InferenceRequest(
+            messages=(InferenceMessage("system", instruction), InferenceMessage("user", content)),
+            schema={"type": "object", "properties": {
+                "abstain": {"type": "boolean"},
+                "selected_refs": {"type": "array", "items": {"type": "string", "enum": refs}},
+            }, "required": ["abstain", "selected_refs"], "additionalProperties": False},
+            schema_name="evidence_selection", max_output_tokens=1024, temperature=0,
+        )
         try:
-            result = self._client.chat.completions.create(**payload)
-        except self._api_errors as exc:
-            self.execution["outcome"] = "provider_error"
-            status = getattr(exc, "status_code", None)
-            suffix = f" (HTTP {status})" if isinstance(status, int) else ""
-            # Provider error bodies may contain source excerpts or request details.
-            raise ProviderError(f"Groq request failed{suffix}; no fallback was performed.") from None
+            result = self.inference.infer(request)
+        except ProviderError:
+            self.execution = self._not_called() | dict(self.inference.execution)
+            raise
+        self.execution = self._not_called() | dict(self.inference.execution)
         try:
-            if len(result.choices) != 1 or result.choices[0].finish_reason != "stop":
-                raise SelectionError("Groq did not return one complete evidence selection.")
-            raw = result.choices[0].message.content
+            if result.finish_reason != "stop":
+                raise SelectionError("Inference did not return one complete evidence selection.")
+            raw = result.content
             if not isinstance(raw, str) or len(raw) > 16000:
-                raise SelectionError("Groq evidence selection content is invalid.")
+                raise SelectionError("Inference evidence selection content is invalid.")
             response = json.loads(raw)
             if not isinstance(response, dict) or set(response) != {"abstain", "selected_refs"}:
-                raise SelectionError("Groq evidence selection has unexpected fields.")
+                raise SelectionError("Inference evidence selection has unexpected fields.")
             abstain, selected = response["abstain"], response["selected_refs"]
             if type(abstain) is not bool or not isinstance(selected, list):
-                raise SelectionError("Groq evidence selection has invalid field types.")
+                raise SelectionError("Inference evidence selection has invalid field types.")
             if abstain != (selected == []):
-                raise SelectionError("Groq abstention conflicts with its selected references.")
+                raise SelectionError("Inference abstention conflicts with its selected references.")
             refs = validate_selection(selected, passages)
         except (ValueError, TypeError, AttributeError, IndexError, RecursionError) as exc:
             self.execution["outcome"] = "abstained" if isinstance(exc, SelectionAbstention) else "rejected"
             if isinstance(exc, SelectionError):
                 raise
-            raise SelectionError("Groq evidence selection could not be validated.") from None
+            raise SelectionError("Inference evidence selection could not be validated.") from None
         self.execution["outcome"] = "validated"
         return refs
+
+
+class GroqPassageSelector(PassageSelector):
+    """Compatibility constructor; new application composition uses the port."""
+
+    def __init__(self, api_key: str | None = None, model: str = "openai/gpt-oss-20b",
+                 timeout: float = 20, client=None, query: str | None = None,
+                 contexts: dict[str, str] | None = None):
+        try:
+            inference = GroqInference(api_key=api_key, model=model, timeout=timeout, client=client)
+        except InferenceError as exc:
+            raise SelectionError(str(exc)) from None
+        super().__init__(inference, query, contexts)
