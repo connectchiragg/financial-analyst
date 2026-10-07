@@ -343,10 +343,24 @@ class FileFixtureAdapter:
         elif group_text.endswith("E"):
             if observation.kind != "broker_forecast":
                 raise EvidenceError("Forecast-column status is unsupported.")
+            if self._source_reports_actual_quarter(observation.period):
+                raise EvidenceError("Reported-quarter source corroboration cannot be relabeled as a forecast.")
         elif observation.kind != "reported_actual":
             raise EvidenceError("Historical column does not support the supplied observation kind.")
         self._locations[cell["ref"]] = f"{observation.source_metric_raw} row / {observation.source_header_raw}"
         self._locations[context["ref"]] = "Quarterly table heading and authenticated source labels"
+
+    def _source_reports_actual_quarter(self, period: str) -> bool:
+        # Determine the reported-quarter status from the authenticated PDF,
+        # even when a caller changes kind or removes corroborating references.
+        # The same pages/wording are required by this adapter's actual binding.
+        if len(self._pages) < 3:
+            return False
+        quarter = re.escape(period)
+        return bool(
+            re.search(rf"\bdelivered\b[^.]*\brevenue\b[^.]*\bin {quarter}\b", self._pages[0]["text"], re.I)
+            and re.search(rf"\breported {quarter} revenue\b", self._pages[2]["text"], re.I)
+        )
 
     def _validate_actual_status(self, observation: RevenueObservation) -> None:
         passages = [self.resolve(ref) for ref in observation.evidence_refs]
