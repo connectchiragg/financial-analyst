@@ -7,6 +7,7 @@ observations or claim to understand arbitrary report layouts.
 from __future__ import annotations
 
 import hashlib
+from io import BytesIO
 import json
 import re
 from dataclasses import dataclass
@@ -67,6 +68,24 @@ class FileFixtureAdapter:
 
     mode = "fixture"
 
+    @property
+    def source_sha256(self) -> str:
+        return self._source["sha256"]
+
+    @property
+    def document_name(self) -> str:
+        return self._source["document_name"]
+
+    @property
+    def source_url(self) -> str | None:
+        return self._link
+
+    def reviewed_observations(self) -> tuple[RevenueObservation, ...]:
+        return tuple(self._observations)
+
+    def reviewed_evidence(self) -> tuple[Evidence, ...]:
+        return tuple(self.resolve(ref) for ref in self._evidence)
+
     def __init__(self, fixture_path: str | Path, source_path: str | Path | None = None):
         try:
             self._load(fixture_path, source_path)
@@ -90,7 +109,8 @@ class FileFixtureAdapter:
         source = payload.get("source", {})
         path = Path(source_path or source.get("local_path", ""))
         try:
-            digest = hashlib.sha256(path.read_bytes()).hexdigest()
+            source_bytes = path.read_bytes()
+            digest = hashlib.sha256(source_bytes).hexdigest()
         except OSError as exc:
             raise EvidenceError("Original source PDF is unavailable.") from exc
         if not source.get("sha256") or digest != source["sha256"]:
@@ -106,7 +126,7 @@ class FileFixtureAdapter:
         except ImportError as exc:
             raise EvidenceError("PDF fixture validation requires the optional pdfplumber dependency.") from exc
         try:
-            with pdfplumber.open(path) as pdf:
+            with pdfplumber.open(BytesIO(source_bytes)) as pdf:
                 if source.get("page_count") != len(pdf.pages):
                     raise EvidenceError("Source page count does not match the reviewed fixture.")
                 self._pages = [

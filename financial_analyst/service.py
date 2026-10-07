@@ -41,15 +41,21 @@ class ApplicationService:
 
     def _begin_request(self) -> None:
         self._retrieval_used = False
+        self._database_used = False
         self._llm_execution = {"provider": "none", "mode": "not_called"}
 
-    def _execution(self, growth: bool = False) -> dict[str, Any]:
+    def _execution(self) -> dict[str, Any]:
         llm = dict(self._llm_execution)
-        return {"mode": "fixture", "analytics": "fixture",
-                "retrieval": "curated_fixture" if self._retrieval_used else "not_requested",
-                "llm": llm, "database": "none",
+        analytics = getattr(self.analytics, "mode", "fixture")
+        retrieval = getattr(self.passages, "mode", "fixture")
+        if retrieval == "fixture":
+            retrieval = "curated_fixture"
+        return {"mode": "live" if analytics == "sqlite" else "fixture", "analytics": analytics,
+                "seed_provenance": tuple(getattr(self.analytics, "seed_provenance", ())),
+                "retrieval": retrieval if self._retrieval_used else "not_requested",
+                "llm": llm, "database": "sqlite" if self._database_used else "none",
                 "selection_executed": llm["mode"] in {"live", "test_double"},
-                "no_llm": llm["mode"] != "live", "no_database": True}
+                "no_llm": llm["mode"] != "live", "no_database": not self._database_used}
 
     def _conflicts(self) -> tuple[dict, ...]:
         return tuple(getattr(self.evidence, "source_conflicts", ()))
@@ -67,18 +73,26 @@ class ApplicationService:
         return self.refuse("The source has conflicting fiscal year-end labels. Calendar dates cannot be resolved from this fixture; the original fiscal labels are preserved.")
 
     def _one(self, company: str, period: str, kind: str) -> RevenueObservation:
+        if getattr(self.analytics, "mode", None) == "sqlite":
+            bound_source = getattr(self.analytics, "source_sha256", None)
+            if not bound_source or bound_source != getattr(self.evidence, "source_sha256", None):
+                raise EvidenceError("SQLite source binding does not match the original PDF evidence validator.")
+        self._database_used = getattr(self.analytics, "mode", None) == "sqlite"
         observations = self.analytics.read_observations(company, period)
         if any(item.company != company or item.period != period for item in observations):
             raise EvidenceError("Read adapter returned observations for a different company or quarter.")
         matches = [item for item in observations if item.kind == kind]
         if len(matches) != 1:
-            raise EvidenceError(f"Fixture requires exactly one {kind} observation for the requested company and quarter.")
+            raise EvidenceError(f"The read adapter requires exactly one {kind} observation for the requested company and quarter.")
         self.evidence.validate_observation(matches[0])
         return matches[0]
 
     def _growth_claims(self, company: str, period: str, select: bool = True) -> tuple[Claim, ...]:
         if self.passages is None:
             raise EvidenceError("Curated growth passage retrieval is unavailable.")
+        passage_source = getattr(self.passages, "source_sha256", None)
+        if passage_source is not None and passage_source != getattr(self.evidence, "source_sha256", None):
+            raise EvidenceError("Passage source binding does not match the original PDF evidence validator.")
         self._retrieval_used = True
         passages = self.passages.growth_passages(company, period)
         if not passages:
@@ -135,7 +149,7 @@ class ApplicationService:
                 claims.extend(self._growth_claims(company, period))
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             return Answer("answered", tuple(claims), result, self._citations(refs),
-                          self._execution(include_growth), source_conflicts=self._conflicts())
+                          self._execution(), source_conflicts=self._conflicts())
         except (EvidenceError, ComparisonError, SelectionError) as exc:
             return self.refuse(str(exc))
 
@@ -146,7 +160,7 @@ class ApplicationService:
             claims = self._growth_claims(company, period)
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             return Answer("answered", claims, citations=self._citations(refs),
-                          execution=self._execution(True), source_conflicts=self._conflicts())
+                          execution=self._execution(), source_conflicts=self._conflicts())
         except (EvidenceError, ComparisonError, SelectionError) as exc:
             return self.refuse(str(exc))
 
@@ -156,7 +170,7 @@ class ApplicationService:
             claims = self._growth_claims(company, period, select=False)
             refs = tuple(ref for claim in claims for ref in claim.evidence_refs)
             reason = "This fixture has no supported allocation of the estimate variance to individual drivers. The cited passages describe revenue growth and cannot allocate the comparison amount."
-            return Answer("refused", citations=self._citations(refs), execution=self._execution(True),
+            return Answer("refused", citations=self._citations(refs), execution=self._execution(),
                           reason=reason, source_conflicts=self._conflicts())
         except EvidenceError as exc:
             return self.refuse(str(exc))

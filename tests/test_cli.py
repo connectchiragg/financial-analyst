@@ -2,6 +2,7 @@ from decimal import Decimal, Inexact, localcontext
 import json
 from pathlib import Path
 import subprocess
+import sqlite3
 import sys
 import tempfile
 from types import SimpleNamespace
@@ -134,6 +135,46 @@ class CliTests(unittest.TestCase):
             run = self.run_cli(*flags, "search", "revenue")
             self.assertEqual(run.returncode, 2)
             self.assertEqual(run.stdout, "")
+
+    def test_ingestion_is_idempotent_and_live_comparison_reads_sqlite(self):
+        database = Path(self.directory.name) / "analyst.sqlite"
+        flags = ("--mode", "live", "--database", str(database), "--fixture", str(self.fixture), "--format", "json")
+        ingest = self.run_cli(*flags, "ingest")
+        self.assertEqual(ingest.returncode, 0, ingest.stderr)
+        result = json.loads(ingest.stdout)
+        self.assertEqual(result["status"], "ingested")
+        self.assertEqual(result["counts"]["observations_added"], 3)
+        repeated = self.run_cli(*flags, "ingest")
+        self.assertEqual(repeated.returncode, 0, repeated.stderr)
+        self.assertEqual(json.loads(repeated.stdout)["status"], "unchanged")
+        comparison = self.run_cli(*flags, "combined", "--company", "Example Pharma", "--period", "1QFY27", "--yoy")
+        self.assertEqual(comparison.returncode, 0, comparison.stderr)
+        answer = json.loads(comparison.stdout)
+        self.assertEqual(answer["claims"][0]["values"]["delta"], "20")
+        self.assertEqual(answer["execution"]["mode"], "live")
+        self.assertEqual(answer["execution"]["analytics"], "sqlite")
+        self.assertEqual(answer["execution"]["database"], "sqlite")
+        self.assertFalse(answer["execution"]["no_database"])
+        self.assertEqual(answer["execution"]["seed_provenance"], ["reviewed_fixture"])
+        self.assertTrue(answer["execution"]["no_llm"])
+        connection = sqlite3.connect(database)
+        try:
+            connection.execute("UPDATE observations SET value_text = '999' WHERE period='1QFY27' AND kind='reported_actual'")
+            connection.commit()
+        finally:
+            connection.close()
+        tampered = self.run_cli(*flags, "compare", "--company", "Example Pharma", "--period", "1QFY27")
+        self.assertEqual(tampered.returncode, 1, tampered.stderr)
+        self.assertEqual(json.loads(tampered.stdout)["claims"], [])
+
+    def test_ingestion_rejects_source_tampering_before_database_creation(self):
+        database = Path(self.directory.name) / "not-created.sqlite"
+        payload = json.loads(self.fixture.read_text())
+        payload["source"]["sha256"] = "0" * 64
+        self.fixture.write_text(json.dumps(payload))
+        run = self.run_cli("--mode", "live", "--database", str(database), "--fixture", str(self.fixture), "ingest")
+        self.assertEqual(run.returncode, 2)
+        self.assertFalse(database.exists())
 
 
 if __name__ == "__main__":

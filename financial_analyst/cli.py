@@ -47,8 +47,10 @@ def _render_text(answer):
     retrieval = answer.execution.get("retrieval", "not_requested").replace("_", " ")
     llm = answer.execution.get("llm", {"mode": "not_called"})
     llm_label = "none" if llm["mode"] == "not_called" else f"{llm['mode']} {llm['provider']} ({llm['model']})"
-    lines = [f"Execution: {answer.execution.get('mode', 'fixture')}; analytics: fixture; "
-             f"retrieval: {retrieval}; LLM: {llm_label}; database: none."]
+    lines = [f"Execution: {answer.execution.get('mode', 'fixture')}; analytics: {answer.execution.get('analytics', 'fixture')}; "
+             f"retrieval: {retrieval}; LLM: {llm_label}; database: {answer.execution.get('database', 'none')}."]
+    if answer.execution.get("seed_provenance"):
+        lines.append("Database seed provenance: " + ", ".join(answer.execution["seed_provenance"]) + ".")
     if answer.status != "answered":
         lines.append(f"Refused: {answer.reason}")
         if answer.citations:
@@ -109,10 +111,12 @@ def _parser():
     parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use GROQ_API_KEY from the environment.")
     parser.add_argument("--groq-model", default="openai/gpt-oss-20b", help="Explicit model for Groq evidence selection.")
     parser.add_argument("--manifest", type=Path, help="Hash-pinned local research PDF manifest for exploratory search.")
+    parser.add_argument("--database", type=Path, help="Local SQLite file for ingestion or live relational analytics.")
     commands = parser.add_subparsers(dest="command", required=True)
     search = commands.add_parser("search", help="Explore exact PDF passages with local keyword ranking.")
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
+    commands.add_parser("ingest", help="Validate and transactionally ingest a reviewed source bundle into SQLite.")
     for name in ("compare", "combined", "growth", "ask", "beat-attribution"):
         command = commands.add_parser(name)
         command.add_argument("--company", required=True)
@@ -158,17 +162,52 @@ def _search(args, parser):
     return 0
 
 
+def _ingest(args, parser):
+    if args.mode != "live" or args.database is None or args.fixture is None:
+        parser.error("Ingestion requires --mode live, --database and --fixture; no fallback was performed.")
+    if args.llm != "none":
+        parser.error("Reviewed-bundle ingestion does not invoke an LLM.")
+    try:
+        from .adapters import FileFixtureAdapter
+        from .sqlite_adapter import DocumentRecord, SQLiteStore
+        fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        document = DocumentRecord(fixture.document_name, fixture.source_sha256, fixture.source_url,
+                                  metadata={"source_conflicts": fixture.source_conflicts})
+        store = SQLiteStore(args.database)
+        store.initialize()
+        ingested = store.ingest(document, fixture.reviewed_observations(), fixture.reviewed_evidence(), fixture)
+        result = {"status": "ingested" if any(asdict(ingested).values()) else "unchanged",
+                  "counts": asdict(ingested), "claims": [],
+                  "execution": {"mode": "live", "database": "sqlite", "source_validation": "local_pdf",
+                                "seed_provenance": "reviewed_fixture", "no_database": False, "no_llm": True}}
+    except (ValueError, OSError, ImportError) as error:
+        print(f"SQLite ingestion failed: {error}", file=sys.stderr)
+        return 2
+    if args.format == "json":
+        print(json.dumps(result, indent=2))
+    else:
+        print(f"SQLite ingestion: {result['status']}; input: PDF-validated reviewed fixture; LLM: none.")
+        print(json.dumps(result["counts"]))
+    return 0
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "search":
         return _search(args, parser)
-    if args.mode != "fixture":
-        parser.error("Live execution is not configured in this iteration; no fallback was performed.")
+    if args.command == "ingest":
+        return _ingest(args, parser)
+    if args.mode == "live" and args.database is None:
+        parser.error("Live analytics requires --database; no fallback was performed.")
+    if args.mode == "local":
+        parser.error("Local mode supports exploratory search only; no fallback was performed.")
+    if args.mode == "fixture" and args.database is not None:
+        parser.error("Select --mode live to read SQLite; no fallback was performed.")
     if args.retrieval != "fixture":
         parser.error(f"{args.retrieval.capitalize()} retrieval is not implemented in this checkpoint; no fallback was performed.")
     if args.fixture is None:
-        parser.error("--fixture is required in fixture mode.")
+        parser.error("--fixture is required for original PDF evidence validation.")
 
     selector = None
     try:
@@ -181,12 +220,16 @@ def main(argv=None):
         from .service import ApplicationService
 
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        analytics = fixture
+        if args.mode == "live":
+            from .sqlite_adapter import SQLiteAnalyticsAdapter
+            analytics = SQLiteAnalyticsAdapter(args.database, source_sha256=fixture.source_sha256)
         if args.llm == "groq" and operation in ("growth", "combined"):
             from .selection import GroqPassageSelector, load_groq_key
             selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
         elif args.llm == "groq" and operation == "compare":
             raise ValueError("Groq selection requires a growth or combined request; no model call was performed.")
-        service = ApplicationService(fixture, fixture, fixture, selector=selector)
+        service = ApplicationService(analytics, fixture, fixture, selector=selector)
         if operation == "growth":
             answer = service.growth_answer(args.company, args.period)
         elif operation in ("beat-attribution", "beat_attribution"):
@@ -197,12 +240,12 @@ def main(argv=None):
             )
     except UnsupportedQuestion as error:
         result = {"status": "refused", "reason": str(error), "claims": [], "execution": {
-            "mode": "fixture", "retrieval": "not_requested", "no_llm": True, "no_database": True
+            "mode": args.mode, "analytics": "not_requested", "retrieval": "not_requested", "no_llm": True, "no_database": True
         }}
-        print(json.dumps(result, indent=2) if args.format == "json" else f"Execution: fixture; LLM: none; database: none.\nRefused: {error}")
+        print(json.dumps(result, indent=2) if args.format == "json" else f"Execution: {args.mode}; LLM: none; database: none.\nRefused: {error}")
         return 1
     except (ValueError, OSError, ImportError, RuntimeError) as error:
-        print(f"Fixture execution failed: {error}", file=sys.stderr)
+        print(f"Execution failed: {error}", file=sys.stderr)
         return 2
     finally:
         if selector is not None:

@@ -4,7 +4,7 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 ## Current status
 
-The first fixture iteration compares quarterly revenue actuals with broker estimates, optionally calculates YoY growth, and retrieves curated growth passages. Analytics remains **fixture execution**. Optional Groq execution selects verified growth passages by reference; the application returns canonical source quotes and deterministic calculations. Database and semantic retrieval are later capabilities.
+Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Optional live Groq selects verified growth passages by reference; the application returns canonical source quotes and deterministic calculations. Semantic retrieval and a general tool-using agent are later capabilities.
 
 Local keyword search explores hash-verified PDFs and returns exact page passages with lexical scores and citations. Its raw passages have no reviewed financial context and do not enter calculated answers. Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
@@ -72,7 +72,22 @@ Data sources, execution modes, and retrieval capabilities must be labeled accura
 
 ## Boundaries and current limits
 
-Source lookup stays in adapters; the revenue comparator is pure. SQLite persistence and validated ingestion are planned behind adapters. No database is connected in this checkpoint.
+Source lookup and persistence stay behind adapters; the revenue comparator is pure. SQLite stores observations as rows, with explicit company, fiscal period, scope, metric, kind, currency and unit. New companies, metrics and periods are records rather than columns. Exact decimal text preserves monetary precision. Raw labels and optional source metadata accommodate report details. Documents, evidence, observations and supporting links form the versioned relational core; fundamental relationship changes may still require a migration.
+
+## SQLite ingestion and analytics
+
+Ingest an already reviewed bundle after original PDF validation. Initialization creates the local SQLite file explicitly; failed source validation creates no database. Ingestion is transactional and repeatable; identical inputs are unchanged, while conflicting source identities or observations fail instead of overwriting data.
+
+```sh
+python -m financial_analyst --mode live --database path/to/analyst.sqlite \
+  --fixture path/to/reviewed-fixture.json ingest
+
+python -m financial_analyst --mode live --database path/to/analyst.sqlite \
+  --fixture path/to/reviewed-fixture.json --format json \
+  combined --company "Example Pharma" --period 1QFY27 --yoy
+```
+
+Analytics opens the existing database read-only and revalidates returned observations against original PDF evidence. Output reports actual SQLite execution and `reviewed_fixture` seed provenance separately. Tampering cannot bypass evidence checks. The current CLI binds reads to one reviewed document; unbound multi-document reads need a multi-source evidence resolver. General PDF extraction, sensitive-data redaction and automatic ingestion of unreviewed model output are not implemented.
 
 This iteration validates manually reviewed source bindings and retrieves curated passages. It does not extract arbitrary PDFs, perform a general semantic assessment, or guarantee that an entire corpus lacks an answer. A growth explanation does not establish the cause or product contribution of an estimate beat. Conflicting fiscal year-end labels remain visible; calendar dates are not inferred.
 

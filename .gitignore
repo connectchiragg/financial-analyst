@@ -11,6 +11,11 @@ __pycache__/
 *.PDF
 *.zip
 *.ZIP
+*.sqlite
+*.sqlite3
+*.db
+*-wal
+*-shm
 
 # Private design review and temporary progress notes.
 /docs/LLD-*.md
