@@ -165,3 +165,11 @@ python -m financial_analyst --mode live --fixture path/to/reviewed-fixture.json 
 The graph allows at most two inference calls and one local tool call, with no retries or fallback. Tools return source-validated amounts, quotes and citations; model-authored financial prose is never rendered. Hosted tracing is disabled. Execution labels and the node trace distinguish live inference, test doubles, SQLite reads and reviewed-fixture provenance.
 
 **This path is experimental.** Model-based whole-question coverage assessment can misinterpret requests; explicit guard tests and representative live probes supplement it. It does not establish support for every unseen question. The existing `ask` grammar and explicit deterministic commands remain available. Structured answer coverage is limited to reviewed revenue data; broad corpus keyword matches do not provide verified cross-company analytics. Provider quota failures produce zero claims and are not successful answer-quality tests.
+
+## Question-only terminal session
+
+```sh
+python -m financial_analyst.chat
+```
+
+The session reads a private `.local/analyst-config.json` with provider, reviewed fixture, optional SQLite database, company and fiscal period. It prompts for questions repeatedly and prints cited canonical answers. Type `/quit`, send EOF or use Ctrl+C to exit. File paths resolve relative to the config file; absolute paths avoid ambiguity. Provider credentials stay in the configured external environment file, never in the config itself. The configured context remains explicit; this wrapper does not create cross-company support.
