@@ -150,3 +150,18 @@ PDF hashes and reviewed source mappings check consistency with the supplied sour
 ## Development approach
 
 Show design checkpoints and ship small commits with verification evidence for review. Keep changes small and report what passed and what remains unverified. Do not commit research source files, private review material, credentials, or user data.
+
+## Experimental local LangGraph planning
+
+`agent-ask` lets the configured inference provider choose one local revenue tool and its typed arguments. LangGraph separates planning, validation, read-only execution, whole-question coverage assessment and canonical output/refusal. It uses the same neutral inference adapters as semantic retrieval; Groq is the current provider. No internet tool deployment is needed.
+
+```sh
+python -m financial_analyst --mode live --fixture path/to/reviewed-fixture.json \
+  --database path/to/analyst.sqlite --llm groq --format json \
+  agent-ask "How did turnover compare with the estimate and what drove revenue growth?" \
+  --company "Example Pharma" --period 1QFY27
+```
+
+The graph allows at most two inference calls and one local tool call, with no retries or fallback. Tools return source-validated amounts, quotes and citations; model-authored financial prose is never rendered. Hosted tracing is disabled. Execution labels and the node trace distinguish live inference, test doubles, SQLite reads and reviewed-fixture provenance.
+
+**This path is experimental.** Model-based whole-question coverage assessment can misinterpret requests; explicit guard tests and representative live probes supplement it. It does not establish support for every unseen question. The existing `ask` grammar and explicit deterministic commands remain available. Structured answer coverage is limited to reviewed revenue data; broad corpus keyword matches do not provide verified cross-company analytics. Provider quota failures produce zero claims and are not successful answer-quality tests.

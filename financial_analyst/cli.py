@@ -135,6 +135,10 @@ def _parser():
     for name in ("scope", "metric", "kind", "currency", "unit"):
         knowledge.add_argument("--" + name)
     knowledge.add_argument("--limit", type=int, default=5)
+    agent = commands.add_parser("agent-ask", help="Experimental local LangGraph argument planning with canonical financial output.")
+    agent.add_argument("question")
+    agent.add_argument("--company", required=True)
+    agent.add_argument("--period", required=True)
     for name in ("compare", "combined", "growth", "ask", "beat-attribution"):
         command = commands.add_parser(name)
         command.add_argument("--company", required=True)
@@ -333,9 +337,51 @@ def _ingest(args, parser):
     return 0
 
 
+def _agent_ask(args, parser):
+    if args.mode not in {"fixture", "live"} or args.fixture is None:
+        parser.error("agent-ask requires a reviewed --fixture and fixture/live analytics mode.")
+    if args.mode == "live" and args.database is None:
+        parser.error("Live agent analytics requires --database; no fallback was performed.")
+    if args.mode == "fixture" and args.database is not None:
+        parser.error("Select --mode live for SQLite agent analytics.")
+    if args.llm == "none":
+        parser.error("agent-ask requires an explicit inference provider for argument planning.")
+    if args.retrieval not in {"fixture", "keyword"}:
+        parser.error("agent-ask uses local curated/keyword tools; semantic selection is outside its two-call budget.")
+    inference = None
+    try:
+        from .adapters import FileFixtureAdapter
+        from .agent import ToolPlanningAgent
+        from .inference import create_inference
+        from .service import ApplicationService
+
+        config = _provider_config(args)
+        fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        analytics, passages = fixture, fixture
+        if args.mode == "live":
+            from .sqlite_adapter import SQLiteAnalyticsAdapter
+            analytics = SQLiteAnalyticsAdapter(args.database, source_sha256=fixture.source_sha256)
+        if args.retrieval == "keyword":
+            from .knowledge import KnowledgeGrowthAdapter
+            passages = KnowledgeGrowthAdapter(fixture)
+        service = ApplicationService(analytics, fixture, passages)
+        inference = create_inference(args.llm, **config)
+        answer = ToolPlanningAgent(inference, service).answer(args.question, args.company, args.period)
+    except (ValueError, OSError, ImportError, RuntimeError) as error:
+        print(f"Agent execution failed: {error}", file=sys.stderr)
+        return 2
+    finally:
+        if inference is not None:
+            inference.close()
+    print(json.dumps(_json_value(answer), indent=2, ensure_ascii=False) if args.format == "json" else _render_text(answer))
+    return 0 if answer.status == "answered" else 1
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "agent-ask":
+        return _agent_ask(args, parser)
     if args.command == "search":
         return _search(args, parser)
     if args.command == "ingest":
