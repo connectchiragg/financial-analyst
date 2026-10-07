@@ -174,6 +174,33 @@ class ReviewedKnowledgeIndex:
             ))
         return cls(tuple(records))
 
+    def filter_records(
+        self,
+        company: str,
+        period: str,
+        scope: str | None = None,
+        metric: str | None = None,
+        kind: str | None = None,
+        currency: str | None = None,
+        unit: str | None = None,
+    ) -> tuple[KnowledgeHit, ...]:
+        """Return all exact context matches before any relevance ranking."""
+        filters = {"company": company, "period": period}
+        for field, value in (("scope", scope), ("metric", metric), ("kind", kind),
+                             ("currency", currency), ("unit", unit)):
+            if value is not None:
+                filters[field] = value
+        for field, value in filters.items():
+            _required_text(value, field)
+        hits = []
+        for record in self.records:
+            matching = tuple(context for context in record.contexts
+                             if all(getattr(context, field) == value for field, value in filters.items()))
+            if not matching:
+                continue
+            hits.append(KnowledgeHit(record, 0.0, matching))
+        return tuple(hits)
+
     def search(
         self,
         query: str,
@@ -187,30 +214,20 @@ class ReviewedKnowledgeIndex:
         limit: int = 5,
     ) -> tuple[KnowledgeHit, ...]:
         _required_text(query, "query")
-        filters = {"company": company, "period": period}
-        for field, value in (("scope", scope), ("metric", metric), ("kind", kind),
-                             ("currency", currency), ("unit", unit)):
-            if value is not None:
-                filters[field] = value
-        for field, value in filters.items():
-            _required_text(value, field)
         query_terms = set(re.findall(r"[^\W_]+", query.casefold()))
         if not query_terms:
             raise KnowledgeError("Knowledge query must contain at least one letter or digit.")
         if type(limit) is not int or not 1 <= limit <= MAX_RESULTS:
             raise KnowledgeError(f"Knowledge limit must be an integer from 1 to {MAX_RESULTS}.")
-
+        candidates = self.filter_records(company, period, scope, metric, kind, currency, unit)
         hits = []
-        for record in self.records:
-            matching = tuple(context for context in record.contexts
-                             if all(getattr(context, field) == value for field, value in filters.items()))
-            if not matching:
-                continue
-            text = _prefix(matching, record.page) + "\n" + record.quote
+        for candidate in candidates:
+            record = candidate.record
+            text = candidate.index_text
             terms = set(re.findall(r"[^\W_]+", text.casefold()))
             score = float(len(query_terms & terms))
             if score:
-                hits.append(KnowledgeHit(record, score, matching))
+                hits.append(KnowledgeHit(record, score, candidate.matching_contexts))
         hits.sort(key=lambda hit: (-hit.score, hit.record.document_name, hit.record.page, hit.record.ref))
         return tuple(hits[:limit])
 

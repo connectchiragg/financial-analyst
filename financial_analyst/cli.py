@@ -170,30 +170,47 @@ def _search(args, parser):
 
 
 def _knowledge_search(args, parser):
-    if args.mode != "fixture" or args.retrieval != "keyword" or args.fixture is None:
-        parser.error("Reviewed knowledge search requires --mode fixture --retrieval keyword and --fixture; no fallback was performed.")
-    if args.llm != "none" or args.database is not None:
-        parser.error("This reviewed knowledge command uses local keyword retrieval, without LLM or database execution.")
+    if args.mode != "fixture" or args.retrieval not in {"keyword", "semantic"} or args.fixture is None:
+        parser.error("Reviewed knowledge search requires --mode fixture, --fixture and keyword/semantic retrieval; no fallback was performed.")
+    if args.database is not None:
+        parser.error("Reviewed knowledge search uses source-validated fixture records; no database read was performed.")
+    if args.retrieval == "semantic" and args.llm != "groq":
+        parser.error("Semantic retrieval requires explicit --llm groq; no fallback was performed.")
+    if args.retrieval == "keyword" and args.llm != "none":
+        parser.error("Keyword knowledge search does not invoke an LLM; no fallback was performed.")
+    selector = None
     try:
         from .adapters import FileFixtureAdapter
         from .knowledge import ReviewedKnowledgeIndex
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
         index = ReviewedKnowledgeIndex.from_fixture(fixture)
         filters = {name: getattr(args, name) for name in ("company", "period", "scope", "metric", "kind", "currency", "unit")}
-        hits = index.search(args.query, **filters, limit=args.limit)
+        retriever = index
+        if args.retrieval == "semantic":
+            from .selection import GroqPassageSelector, load_groq_key
+            from .semantic import SemanticKnowledgeRetriever
+            selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
+            retriever = SemanticKnowledgeRetriever(index, selector)
+        hits = retriever.search(args.query, **filters, limit=args.limit)
+        llm = dict(retriever.execution) if selector is not None else {"provider": "none", "mode": "not_called"}
         result = {"status": "retrieved" if hits else "no_matches", "claims": [], "filters": filters,
-                  "hits": [{"record": _json_value(hit.record), "score": hit.score,
+                  "hits": [{"record": _json_value(hit.record),
+                            **({"rank": hit.rank} if selector is not None else {"score": hit.score}),
                             "matching_contexts": _json_value(hit.matching_contexts),
                             "context_prefix": hit.context_prefix} for hit in hits],
-                  "execution": {"mode": "fixture", "retrieval": index.mode, "context": "pdf_validated",
-                                "no_llm": True, "no_database": True}}
-    except (ValueError, OSError, ImportError) as error:
+                  "execution": {"mode": "fixture", "retrieval": retriever.mode, "context": "pdf_validated", "llm": llm,
+                                "no_llm": llm["mode"] != "live", "no_database": True}}
+    except (ValueError, OSError, ImportError, RuntimeError) as error:
         print(f"Reviewed knowledge search failed: {error}", file=sys.stderr)
         return 2
+    finally:
+        if selector is not None:
+            selector.close()
     if args.format == "json":
         print(json.dumps(result, indent=2, ensure_ascii=False))
     else:
-        print("Execution: reviewed fixture knowledge; keyword retrieval; LLM: none; database: none.")
+        llm_label = "none" if llm["mode"] == "not_called" else f"{llm['mode']} {llm['provider']} ({llm['model']})"
+        print(f"Execution: reviewed fixture knowledge; {retriever.mode}; LLM: {llm_label}; database: none.")
         for hit in hits:
             print("\nDerived context: " + hit.context_prefix)
             print("Source quote: " + hit.record.quote)
@@ -248,8 +265,10 @@ def main(argv=None):
         parser.error("Local mode supports exploratory search only; no fallback was performed.")
     if args.mode == "fixture" and args.database is not None:
         parser.error("Select --mode live to read SQLite; no fallback was performed.")
-    if args.retrieval != "fixture" and not (args.retrieval == "keyword" and args.command in {"growth", "combined"}):
-        parser.error(f"{args.retrieval.capitalize()} retrieval is not implemented in this checkpoint; no fallback was performed.")
+    if args.retrieval != "fixture" and args.command not in {"growth", "combined", "ask"}:
+        parser.error("Keyword/semantic answer retrieval requires growth or combined intent; no fallback was performed.")
+    if args.retrieval == "semantic" and args.llm != "groq":
+        parser.error("Semantic retrieval requires explicit --llm groq; no fallback was performed.")
     if args.fixture is None:
         parser.error("--fixture is required for original PDF evidence validation.")
 
@@ -259,6 +278,8 @@ def main(argv=None):
         if operation == "ask":
             plan = plan_question(args.question, args.company, args.period)
             operation, include_yoy = plan.operation, include_yoy or plan.include_yoy
+        if args.retrieval != "fixture" and operation not in {"growth", "combined"}:
+            raise ValueError("Keyword/semantic answer retrieval requires growth or combined intent; no fallback was performed.")
 
         from .adapters import FileFixtureAdapter
         from .service import ApplicationService
@@ -277,7 +298,11 @@ def main(argv=None):
             selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
         elif args.llm == "groq" and operation == "compare":
             raise ValueError("Groq selection requires a growth or combined request; no model call was performed.")
-        service = ApplicationService(analytics, fixture, passages, selector=selector)
+        if args.retrieval == "semantic":
+            from .semantic import SemanticGrowthAdapter
+            passages = SemanticGrowthAdapter(fixture, selector)
+        service = ApplicationService(analytics, fixture, passages,
+                                     selector=selector if args.retrieval != "semantic" else None)
         if operation == "growth":
             answer = service.growth_answer(args.company, args.period)
         elif operation in ("beat-attribution", "beat_attribution"):

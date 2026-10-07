@@ -46,6 +46,24 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(payload["response_format"]["json_schema"]["strict"])
         self.assertEqual(json.loads(payload["messages"][1]["content"])["passages"][0]["excerpt"], self.passages[0].excerpt)
 
+    def test_semantic_request_keeps_context_query_and_source_quote_separate(self):
+        selector, client = self.selector({"abstain": False, "selected_refs": ["growth"]})
+        selector.query = "What helped turnover expand?"
+        selector.contexts = {"growth": "company=Example Pharma | period=1QFY27"}
+        selector.select("Example Pharma", "1QFY27", self.passages)
+        data = json.loads(client.calls[0]["messages"][1]["content"])
+        self.assertEqual(data["query"], selector.query)
+        self.assertEqual(data["passages"][0]["excerpt"], self.passages[0].excerpt)
+        self.assertEqual(data["passages"][0]["derived_context"], selector.contexts["growth"])
+
+    def test_pre_call_failure_after_success_does_not_report_stale_execution(self):
+        selector, _ = self.selector({"abstain": False, "selected_refs": ["growth"]})
+        selector.select("Example Pharma", "1QFY27", self.passages)
+        selector.query = "x" * 4097
+        with self.assertRaises(SelectionError):
+            selector.select("Example Pharma", "1QFY27", self.passages)
+        self.assertEqual(selector.execution["mode"], "not_called")
+
     def test_refuses_forged_or_extra_claims_and_inconsistent_selection(self):
         cases = [
             {"abstain": False, "selected_refs": ["invented"]},

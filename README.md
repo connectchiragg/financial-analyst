@@ -4,7 +4,7 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 ## Current status
 
-Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Optional live Groq selects verified growth passages by reference; the application returns canonical source quotes and deterministic calculations. Semantic retrieval and a general tool-using agent are later capabilities.
+Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional live Groq selects references; the application returns canonical source quotes and deterministic calculations. A general tool-using agent is a later capability.
 
 Local keyword search explores hash-verified PDFs and returns exact page passages with lexical scores and citations. Its raw passages have no reviewed financial context and do not enter calculated answers. Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
@@ -59,7 +59,7 @@ python -m financial_analyst --mode local --retrieval keyword \
   --manifest path/to/research-manifest.json --format json search "revenue growth" --limit 5
 ```
 
-Sources are authenticated and extracted from the same bytes. Results stay within one PDF page, carry stable source-hash references, and expose extraction coverage. Ranking uses BM25 without stemming or synonyms. An empty result means no keyword matches, not proof that the corpus lacks an answer. Semantic retrieval remains unavailable; no fallback occurs.
+Sources are authenticated and extracted from the same bytes. Results stay within one PDF page, carry stable source-hash references, and expose extraction coverage. Ranking uses BM25 without stemming or synonyms. An empty result means no keyword matches, not proof that the corpus lacks an answer. This raw exploratory command supports keyword search only; reviewed knowledge below also supports semantic search.
 
 ## Reviewed knowledge preparation and filters
 
@@ -73,7 +73,19 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
 
 Results expose generated `context_prefix` separately from the unchanged source `quote`, with document hash, page and supporting citations. Unit metadata describes the financial observation; a corroborating quote may contain its own rounded amount/unit, which remains in the quote. Empty results mean no matching reviewed records. General sanitation/redaction is not implemented yet; raw exploratory pages do not bypass this reviewed index.
 
-For `growth` and `combined`, `--retrieval keyword` uses this filtered index instead of directly returning all curated passages. Optional `--llm groq` then selects canonical evidence by reference. Semantic retrieval remains unavailable.
+For `growth` and `combined`, `--retrieval keyword` uses this filtered index instead of directly returning all curated passages. Optional `--llm groq` then selects canonical evidence by reference.
+
+## Bounded semantic retrieval
+
+Use `--retrieval semantic --llm groq` with `kb-search`, `growth` or `combined`. All exact metadata filters run first; Groq sees every eligible record within the explicit budget and judges relevance by meaning. There is no keyword prefilter, embedding API or vector index. This method suits small reviewed candidate sets; exceeding 32 candidates or the 16,000-character provider request budget fails explicitly without truncating evidence or falling back.
+
+```sh
+python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
+  --retrieval semantic --llm groq kb-search "What helped turnover expand?" \
+  --company "Example Pharma" --period 1QFY27 --metric net_sales --kind broker_commentary
+```
+
+Semantic results contain ordinal ranks, unchanged quotes, derived context and supporting citations. They contain no invented confidence score. Abstention returns no matched reviewed records; it does not prove source absence. Malformed replies or API errors cannot yield a fallback answer. A combined semantic request performs one evidence-selection call and leaves the calculation in the deterministic analytics service.
 
 ## Intended behavior
 
@@ -103,7 +115,7 @@ python -m financial_analyst --mode live --database path/to/analyst.sqlite \
 
 Analytics opens the existing database read-only and revalidates returned observations against original PDF evidence. Output reports actual SQLite execution and `reviewed_fixture` seed provenance separately. Tampering cannot bypass evidence checks. The current CLI binds reads to one reviewed document; unbound multi-document reads need a multi-source evidence resolver. General PDF extraction, sensitive-data redaction and automatic ingestion of unreviewed model output are not implemented.
 
-This iteration validates manually reviewed source bindings and retrieves curated passages. It does not extract arbitrary PDFs, perform a general semantic assessment, or guarantee that an entire corpus lacks an answer. A growth explanation does not establish the cause or product contribution of an estimate beat. Conflicting fiscal year-end labels remain visible; calendar dates are not inferred.
+This iteration validates manually reviewed source bindings and retrieves supported passages. It does not automatically extract and validate financial facts from unfamiliar PDF layouts or guarantee that an entire corpus lacks an answer. A growth explanation does not establish the cause or product contribution of an estimate beat. Conflicting fiscal year-end labels remain visible; calendar dates are not inferred.
 
 PDF hashes and reviewed source mappings check consistency with the supplied source. They are not a publisher-signature or remote Drive-authentication mechanism. The original source and its Drive identity must be reviewed when preparing a fixture.
 

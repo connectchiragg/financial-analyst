@@ -41,18 +41,16 @@ class ApplicationService:
 
     def _begin_request(self) -> None:
         self._retrieval_used = False
+        self._retrieval_mode = "not_requested"
         self._database_used = False
         self._llm_execution = {"provider": "none", "mode": "not_called"}
 
     def _execution(self) -> dict[str, Any]:
         llm = dict(self._llm_execution)
         analytics = getattr(self.analytics, "mode", "fixture")
-        retrieval = getattr(self.passages, "mode", "fixture")
-        if retrieval == "fixture":
-            retrieval = "curated_fixture"
         return {"mode": "live" if analytics == "sqlite" else "fixture", "analytics": analytics,
                 "seed_provenance": tuple(getattr(self.analytics, "seed_provenance", ())),
-                "retrieval": retrieval if self._retrieval_used else "not_requested",
+                "retrieval": self._retrieval_mode if self._retrieval_used else "not_requested",
                 "llm": llm, "database": "sqlite" if self._database_used else "none",
                 "selection_executed": llm["mode"] in {"live", "test_double"},
                 "no_llm": llm["mode"] != "live", "no_database": not self._database_used}
@@ -94,9 +92,25 @@ class ApplicationService:
         if passage_source is not None and passage_source != getattr(self.evidence, "source_sha256", None):
             raise EvidenceError("Passage source binding does not match the original PDF evidence validator.")
         self._retrieval_used = True
-        passages = self.passages.growth_passages(company, period)
+        self._retrieval_mode = getattr(self.passages, "mode", "fixture")
+        if self._retrieval_mode == "fixture":
+            self._retrieval_mode = "curated_fixture"
+        growth_reader = self.passages.growth_passages
+        if not select:
+            # Attribution refusal needs canonical source citations, never a
+            # relevance model. Semantic retrieval itself invokes that model.
+            growth_reader = getattr(self.evidence, "growth_passages", None)
+            if not callable(growth_reader):
+                raise EvidenceError("No verified allocation of the estimate variance has been supplied.")
+            self._retrieval_mode = "curated_fixture"
+        try:
+            passages = growth_reader(company, period)
+        finally:
+            retrieval_llm = getattr(self.passages, "execution", None)
+            if select and isinstance(retrieval_llm, dict):
+                self._llm_execution = dict(retrieval_llm)
         if not passages:
-            raise EvidenceError("Fixture has no cited revenue-growth explanations for this quarter.")
+            raise EvidenceError("No supported growth passage was returned for this request. This retrieval outcome does not establish that the source lacks an explanation.")
         verified = []
         for passage in passages:
             # Resolve again through the evidence port. Retrieval cannot supply a
