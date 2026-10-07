@@ -99,8 +99,8 @@ def _render_text(answer):
 
 
 def _parser():
-    parser = argparse.ArgumentParser(description="Grounded financial analyst: approved fixture iteration.")
-    parser.add_argument("--mode", required=True, choices=("fixture", "live"))
+    parser = argparse.ArgumentParser(description="Grounded financial analyst with explicit source and provider modes.")
+    parser.add_argument("--mode", required=True, choices=("fixture", "local", "live"))
     parser.add_argument("--fixture", type=Path, help="Reviewed local fixture JSON; required in fixture mode.")
     parser.add_argument("--source-pdf", type=Path, help="Optional relocation of the fixture's hash-matched PDF.")
     parser.add_argument("--retrieval", choices=("fixture", "keyword", "semantic"), default="fixture")
@@ -108,7 +108,11 @@ def _parser():
     parser.add_argument("--llm", choices=("none", "groq"), default="none", help="Optional live selection of verified growth passages.")
     parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use GROQ_API_KEY from the environment.")
     parser.add_argument("--groq-model", default="openai/gpt-oss-20b", help="Explicit model for Groq evidence selection.")
+    parser.add_argument("--manifest", type=Path, help="Hash-pinned local research PDF manifest for exploratory search.")
     commands = parser.add_subparsers(dest="command", required=True)
+    search = commands.add_parser("search", help="Explore exact PDF passages with local keyword ranking.")
+    search.add_argument("query")
+    search.add_argument("--limit", type=int, default=5)
     for name in ("compare", "combined", "growth", "ask", "beat-attribution"):
         command = commands.add_parser(name)
         command.add_argument("--company", required=True)
@@ -120,9 +124,45 @@ def _parser():
     return parser
 
 
+def _search(args, parser):
+    if args.mode != "local" or args.retrieval != "keyword":
+        parser.error("Exploratory search requires --mode local --retrieval keyword; no fallback was performed.")
+    if args.manifest is None:
+        parser.error("--manifest is required for local keyword search.")
+    if args.llm != "none":
+        parser.error("Exploratory keyword search does not invoke an LLM; no fallback was performed.")
+    try:
+        from .retrieval import LocalKeywordAdapter
+        adapter = LocalKeywordAdapter(args.manifest)
+        hits = adapter.search(args.query, args.limit)
+        result = {"status": "retrieved" if hits else "no_matches", "claims": [],
+                  "hits": [{"passage": _json_value(hit.passage), "score": hit.score,
+                            "citation": _json_value(hit.passage.citation)} for hit in hits],
+                  "coverage": _json_value(adapter.coverage),
+                  "execution": {"mode": "local", "retrieval": "local_keyword", "context": "unreviewed_page_text",
+                                "no_llm": True, "no_database": True}}
+    except (ValueError, OSError, ImportError) as error:
+        print(f"Local search failed: {error}", file=sys.stderr)
+        return 2
+    if args.format == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("Execution: local keyword retrieval; LLM: none; database: none. Exploratory passages, without reviewed financial context.")
+        for hit in hits:
+            passage = hit.passage
+            print(f"\n{passage.document_name}, p. {passage.page}; lexical score {hit.score:.4f}; {passage.locator}")
+            print(passage.excerpt)
+            print(passage.url)
+        if not hits:
+            print("No keyword matches. This search outcome does not establish that the corpus lacks the requested fact.")
+    return 0
+
+
 def main(argv=None):
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.command == "search":
+        return _search(args, parser)
     if args.mode != "fixture":
         parser.error("Live execution is not configured in this iteration; no fallback was performed.")
     if args.retrieval != "fixture":

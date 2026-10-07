@@ -106,6 +106,35 @@ class CliTests(unittest.TestCase):
             text = _render_text(answer)
         self.assertIn(f"missed by {format(amount, ',f')} INR million", text)
 
+    def test_local_keyword_search_is_exploratory_and_not_fixture_execution(self):
+        source = json.loads(self.fixture.read_text())["source"]
+        manifest = Path(self.directory.name) / "manifest.json"
+        manifest.write_text(json.dumps({"documents": [{"document_id": "synthetic", "document_name": source["document_name"],
+            "local_path": source["local_path"], "sha256": source["sha256"], "url": "https://example.test/report"}]}))
+        run = self.run_cli("--mode", "local", "--retrieval", "keyword", "--manifest", str(manifest),
+                           "--format", "json", "search", "revenue growth")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = json.loads(run.stdout)
+        self.assertEqual(result["status"], "retrieved")
+        self.assertEqual(result["claims"], [])
+        self.assertEqual(result["execution"]["mode"], "local")
+        self.assertEqual(result["execution"]["context"], "unreviewed_page_text")
+        self.assertTrue(result["execution"]["no_llm"])
+        self.assertTrue(result["execution"]["no_database"])
+        self.assertTrue(all(hit["passage"]["page"] == hit["citation"]["page"] for hit in result["hits"]))
+        empty = self.run_cli("--mode", "local", "--retrieval", "keyword", "--manifest", str(manifest),
+                             "--format", "json", "search", "unfindabletoken")
+        self.assertEqual(empty.returncode, 0, empty.stderr)
+        self.assertEqual(json.loads(empty.stdout)["status"], "no_matches")
+
+    def test_search_configuration_never_falls_back(self):
+        for flags in [("--mode", "fixture", "--retrieval", "keyword"),
+                      ("--mode", "local", "--retrieval", "semantic"),
+                      ("--mode", "local", "--retrieval", "keyword", "--llm", "groq")]:
+            run = self.run_cli(*flags, "search", "revenue")
+            self.assertEqual(run.returncode, 2)
+            self.assertEqual(run.stdout, "")
+
 
 if __name__ == "__main__":
     unittest.main()

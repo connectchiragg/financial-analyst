@@ -6,7 +6,7 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 The first fixture iteration compares quarterly revenue actuals with broker estimates, optionally calculates YoY growth, and retrieves curated growth passages. Analytics remains **fixture execution**. Optional Groq execution selects verified growth passages by reference; the application returns canonical source quotes and deterministic calculations. Database and semantic retrieval are later capabilities.
 
-Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
+Local keyword search explores hash-verified PDFs and returns exact page passages with lexical scores and citations. Its raw passages have no reviewed financial context and do not enter calculated answers. Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
 ## Run
 
@@ -49,6 +49,17 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
 ```
 
 Output labels fixture analytics, curated fixture retrieval and the actual live Groq call separately. Injected clients are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. This is bounded evidence selection, not a general agent or semantic retrieval implementation.
+
+## Exploratory keyword search
+
+Supply a local manifest containing `documents`, each with `document_id`, `document_name`, `local_path`, `sha256` and `url`. Relative source paths resolve against the manifest directory. Include research documents rather than an exercise brief.
+
+```sh
+python -m financial_analyst --mode local --retrieval keyword \
+  --manifest path/to/research-manifest.json --format json search "revenue growth" --limit 5
+```
+
+Sources are authenticated and extracted from the same bytes. Results stay within one PDF page, carry stable source-hash references, and expose extraction coverage. Ranking uses BM25 without stemming or synonyms. An empty result means no keyword matches, not proof that the corpus lacks an answer. Semantic retrieval remains unavailable; no fallback occurs.
 
 ## Intended behavior
 
