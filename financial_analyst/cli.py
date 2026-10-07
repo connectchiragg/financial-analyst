@@ -104,18 +104,18 @@ def _parser():
     parser = argparse.ArgumentParser(description="Grounded financial analyst with explicit source and provider modes.")
     parser.add_argument("--mode", required=True, choices=("fixture", "local", "live"))
     parser.add_argument("--fixture", type=Path, help="Reviewed local fixture JSON; required in fixture mode.")
-    parser.add_argument("--source-pdf", type=Path, help="Optional relocation of the fixture's hash-matched PDF.")
+    parser.add_argument("--source-pdf", type=Path, help="Original PDF for source validation, relocation or document ingestion.")
     parser.add_argument("--retrieval", choices=("fixture", "keyword", "semantic"), default="fixture")
     parser.add_argument("--format", choices=("text", "json"), default="text")
     parser.add_argument("--llm", choices=("none", "groq", "mistral", "openai-compatible"), default="none",
-                        help="Optional inference provider for verified evidence selection.")
+                        help="Inference provider for reference selection, local tool planning or pending fact extraction.")
     parser.add_argument("--model", help="Model used by the selected inference provider.")
     parser.add_argument("--env-file", type=Path, help="Explicit credential file; otherwise use the selected provider's environment variable.")
     parser.add_argument("--api-key-env", help="Credential variable name (default: GROQ_API_KEY, MISTRAL_API_KEY or INFERENCE_API_KEY).")
     parser.add_argument("--base-url", help="Explicit API base URL for an OpenAI-compatible provider.")
     parser.add_argument("--groq-model", help="Compatibility alias for --model when --llm groq is selected.")
     parser.add_argument("--manifest", type=Path, help="Hash-pinned local research PDF manifest for exploratory search.")
-    parser.add_argument("--database", type=Path, help="Local SQLite file for ingestion or live relational analytics.")
+    parser.add_argument("--database", type=Path, help="Local SQLite file for reviewed analytics or separate document knowledge ingestion.")
     commands = parser.add_subparsers(dest="command", required=True)
     search = commands.add_parser("search", help="Explore exact PDF passages with local keyword ranking.")
     search.add_argument("query")
@@ -135,6 +135,16 @@ def _parser():
     for name in ("scope", "metric", "kind", "currency", "unit"):
         knowledge.add_argument("--" + name)
     knowledge.add_argument("--limit", type=int, default=5)
+    for name in ("store-document", "extract"):
+        document = commands.add_parser(name, help="Persist authenticated source passages and optionally propose unreviewed financial facts.")
+        document.add_argument("--document-id", required=True)
+        document.add_argument("--document-name")
+        document.add_argument("--source-url", required=True)
+        document.add_argument("--company", required=True)
+        document.add_argument("--agency", required=True)
+        if name == "extract":
+            document.add_argument("--pages", help="Comma-separated original page numbers, or all; default first three pages.")
+            document.add_argument("--max-windows", type=int, default=8)
     agent = commands.add_parser("agent-ask", help="Experimental local LangGraph argument planning with canonical financial output.")
     agent.add_argument("question")
     agent.add_argument("--company", required=True)
@@ -337,6 +347,90 @@ def _ingest(args, parser):
     return 0
 
 
+def _document_ingest(args, parser):
+    with_llm = args.command == "extract"
+    if args.mode != "live" or args.source_pdf is None or args.database is None:
+        parser.error("Document ingestion requires --mode live, --source-pdf and a separate knowledge --database.")
+    if args.fixture is not None or args.retrieval != "fixture":
+        parser.error("Document ingestion uses the supplied PDF directly and does not rank evidence or read a fixture.")
+    if with_llm and args.llm == "none":
+        parser.error("LLM extraction requires an explicit --llm provider.")
+    if not with_llm and args.llm != "none":
+        parser.error("store-document persists source passages without inference; use extract for LLM proposals.")
+    inference = None
+    extraction_error = None
+    try:
+        from .document_store import DocumentStore
+        from .extraction import (MAX_WINDOWS, ExtractionError, extract_document,
+                                 prepare_document, validate_extracted_document)
+        config = _provider_config(args)
+        if with_llm:
+            # Larger page/schema extraction requests use an explicit bounded
+            # timeout. Selection and ordinary tool planning retain 20 seconds.
+            config["timeout"] = 60
+        identity = {"document_id": args.document_id, "document_name": args.document_name or args.source_pdf.name,
+                    "url": args.source_url, "company": args.company, "agency": args.agency}
+        if with_llm:
+            if not 1 <= args.max_windows <= MAX_WINDOWS:
+                raise ValueError("--max-windows must be between one and eight.")
+            # Validate the input and selected pages before opening a provider or
+            # creating a database. Invalid configuration is not a failed run.
+            source = prepare_document(args.source_pdf, **identity)
+            pages = None
+            if args.pages is not None:
+                if args.pages == "all":
+                    pages = tuple(range(1, source.source.page_count + 1))
+                else:
+                    try:
+                        pages = tuple(int(value) for value in args.pages.split(","))
+                    except ValueError:
+                        raise ValueError("--pages requires original page numbers or all.") from None
+                    if (not pages or len(set(pages)) != len(pages)
+                            or any(not 1 <= page <= source.source.page_count for page in pages)):
+                        raise ValueError("--pages must contain unique original page numbers within the source.")
+            from .inference import create_inference
+            inference = create_inference(args.llm, **config)
+            try:
+                bundle = extract_document(args.source_pdf, **identity, inference=inference,
+                                          pages=pages, max_windows=args.max_windows)
+            except ExtractionError as error:
+                if error.source_document is None:
+                    raise
+                bundle = error.source_document
+                extraction_error = str(error)
+        else:
+            bundle = prepare_document(args.source_pdf, **identity)
+        # Reauthenticate before even creating the schema; ingestion checks
+        # again before its write transaction in case the source has changed.
+        validate_extracted_document(bundle, args.source_pdf)
+        store = DocumentStore(args.database)
+        store.initialize()
+        counts = store.ingest(bundle, source_path=args.source_pdf)
+        execution = dict(bundle.execution)
+        execution.update(database="sqlite_knowledge", no_database=False, sanitization="not_performed")
+        if inference is not None:
+            execution.update(llm=dict(inference.execution), no_llm=inference.execution.get("mode") != "live")
+        result = {"status": "source_stored_extraction_failed" if extraction_error else
+                  "extracted_pending_review" if with_llm else "source_stored_unreviewed",
+                  "claims": [], "counts": _json_value(counts), "source": _json_value(bundle.source),
+                  "coverage": _json_value(bundle.coverage), "execution": execution,
+                  "review_state": "pending_financial_association_review", "error": extraction_error}
+    except (ValueError, OSError, ImportError, RuntimeError) as error:
+        print(f"Document ingestion failed: {error}", file=sys.stderr)
+        return 2
+    finally:
+        if inference is not None:
+            inference.close()
+    if args.format == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print(f"Document ingestion: {result['status']}; stored source passages: {counts.passages_added}; proposed facts: {counts.facts_added}.")
+        print("Financial associations remain unreviewed; no analytical claims were produced.")
+        if extraction_error:
+            print("LLM extraction failed; only authenticated source passages were stored.")
+    return 2 if extraction_error else 0
+
+
 def _agent_ask(args, parser):
     if args.mode not in {"fixture", "live"} or args.fixture is None:
         parser.error("agent-ask requires a reviewed --fixture and fixture/live analytics mode.")
@@ -378,8 +472,14 @@ def _agent_ask(args, parser):
 
 
 def main(argv=None):
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    if arguments and arguments[0] == "chat":
+        from .chat import main as chat_main
+        return chat_main(arguments[1:])
     parser = _parser()
-    args = parser.parse_args(argv)
+    args = parser.parse_args(arguments)
+    if args.command in {"store-document", "extract"}:
+        return _document_ingest(args, parser)
     if args.command == "agent-ask":
         return _agent_ask(args, parser)
     if args.command == "search":

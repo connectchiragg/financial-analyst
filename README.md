@@ -4,7 +4,7 @@ A CLI for source-backed revenue comparisons and growth commentary, starting with
 
 ## Current status
 
-Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional inference selects references through a provider-neutral port; the application returns canonical source quotes and deterministic calculations. A general tool-using agent is a later capability.
+Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional inference selects references through a provider-neutral port; the application returns canonical source quotes and deterministic calculations. A separate experimental LangGraph path plans bounded local revenue-tool calls; it does not establish full cross-company coverage.
 
 Local keyword search explores hash-verified PDFs and returns exact page passages with lexical scores and citations. Its raw passages have no reviewed financial context and do not enter calculated answers. Research PDFs, reviewed research fixtures, and private review notes are excluded from this public repository. Public tests generate synthetic PDFs and fixtures.
 
@@ -101,7 +101,7 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
 
 The JSON manifest labels `reviewed_fixture` provenance and `local_preparation_only`. This command performs no inference, database read, remote upload, sensitive-data redaction or general PDF sanitation. It defaults to an ignored local directory. Use a new destination for a different bundle; repeated identical content is unchanged, while conflicting files fail without replacement, including files created concurrently during export. No matching reviewed contexts produces no export.
 
-Prepared bundles are inputs for later indexing, not authority to answer financial questions without original-source validation. Current answer retrieval still builds its reviewed index through the source adapter. Unfamiliar PDF extraction and general document onboarding remain pending.
+Prepared bundles are inputs for later indexing, not authority to answer financial questions without original-source validation. Current answer retrieval still builds its reviewed index through the source adapter. The document workflow below stores unfamiliar PDFs and proposes facts, but financial associations still require review before answerable indexing.
 
 ## Bounded semantic retrieval
 
@@ -141,11 +141,37 @@ python -m financial_analyst --mode live --database path/to/analyst.sqlite \
   combined --company "Example Pharma" --period 1QFY27 --yoy
 ```
 
-Analytics opens the existing database read-only and revalidates returned observations against original PDF evidence. Output reports actual SQLite execution and `reviewed_fixture` seed provenance separately. Tampering cannot bypass evidence checks. The current CLI binds reads to one reviewed document; unbound multi-document reads need a multi-source evidence resolver. General PDF extraction, sensitive-data redaction and automatic ingestion of unreviewed model output are not implemented.
+Analytics opens the existing database read-only and revalidates returned observations against original PDF evidence. Output reports actual SQLite execution and `reviewed_fixture` seed provenance separately. Tampering cannot bypass evidence checks. The current CLI binds reads to one reviewed document; unbound multi-document reads need a multi-source evidence resolver. The separate document store below ingests canonical passages and pending LLM proposals. Sensitive-data redaction and promotion of those proposals into reviewed analytics are not implemented.
 
 This iteration validates manually reviewed source bindings and retrieves supported passages. It does not automatically extract and validate financial facts from unfamiliar PDF layouts or guarantee that an entire corpus lacks an answer. A growth explanation does not establish the cause or product contribution of an estimate beat. Conflicting fiscal year-end labels remain visible; calendar dates are not inferred.
 
 PDF hashes and reviewed source mappings check consistency with the supplied source. They are not a publisher-signature or remote Drive-authentication mechanism. The original source and its Drive identity must be reviewed when preparing a fixture.
+
+## New-document passages and pending fact extraction
+
+Store every extractable page passage in a separate private knowledge database. This preserves unchanged text, source hash, original page and offsets, with a readable prefix separate from the quotation. Company and research-house metadata supplied at import remain unreviewed.
+
+```sh
+python -m financial_analyst --mode live --source-pdf path/to/report.pdf \
+  --database .local/knowledge.sqlite --format json store-document \
+  --document-id source-document-id --source-url https://example.com/report \
+  --company "Example Pharma" --agency "Example Research"
+```
+
+Use `extract` with an explicit inference provider to propose financial observations from bounded page windows. It stores all source passages even when only selected pages are sent to inference. The default selection is the first three pages; `--pages 2,6` or `--pages all` selects others, within a maximum of eight windows. The provider may return a small subset of facts; attempted pages never mean complete fact coverage. Each extraction call has a 60-second timeout and requests up to three proposals at a bounded 4,096-token output budget, with no retries.
+
+```sh
+python -m financial_analyst --mode live --source-pdf path/to/report.pdf \
+  --database .local/knowledge.sqlite --llm groq --format json extract \
+  --document-id source-document-id --source-url https://example.com/report \
+  --company "Example Pharma" --agency "Example Research" --pages 2 --max-windows 1
+```
+
+Quotes and raw labels must match canonical source passages exactly. Decimal text must match the source number without changing its scale. Ambiguous period, scope or unit remains nullable. Actual/estimate/forecast status stays unknown in proposals; exact source status markers are retained for independent review. **Exact quote matching does not validate table-column interpretation.** All proposals remain pending review, produce no financial claims, and cannot enter the answerable index. Live-provider and synthetic-test execution are labeled separately.
+
+Imports reauthenticate the source PDF and canonical passages before a transactional SQLite write. Identical inputs are unchanged; conflicting identities are rejected. The knowledge store uses a separate format from the reviewed analytics database. Provider or evidence failures return exit code `2`, retain only authenticated source passages, and report the failure explicitly. There is no silent fixture fallback or automatic review promotion.
+
+This is an extraction and storage increment. Sensitive-data sanitation/redaction, a review/promotion workflow, corpus-wide semantic indexing and general cross-company analytics remain pending. Live extraction readiness must be verified against the chosen provider; synthetic tests alone do not establish it.
 
 ## Development approach
 
