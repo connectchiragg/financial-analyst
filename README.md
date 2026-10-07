@@ -48,7 +48,7 @@ python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.js
   --llm groq --format json combined --company "Example Pharma" --period 1QFY27
 ```
 
-Output labels fixture analytics, curated fixture retrieval and the actual live Groq call separately. Injected clients are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. This is bounded evidence selection, not a general agent or semantic retrieval implementation.
+Output labels fixture analytics, curated fixture retrieval and the actual live Groq call separately. Injected clients are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. This selector performs bounded evidence selection. The semantic adapter below adds query-based retrieval after context filters; a general tool-using agent remains pending.
 
 ## Exploratory keyword search
 
