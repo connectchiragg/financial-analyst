@@ -1,0 +1,17 @@
+.local/
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+!.env.example
+
+# Research source files and archives stay private.
+*.pdf
+*.PDF
+*.zip
+*.ZIP
+
+# Private design review and temporary progress notes.
+/docs/LLD-*.md
+/docs/PROGRESS.md
