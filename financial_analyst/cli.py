@@ -117,6 +117,13 @@ def _parser():
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
     commands.add_parser("ingest", help="Validate and transactionally ingest a reviewed source bundle into SQLite.")
+    knowledge = commands.add_parser("kb-search", help="Search contextualized evidence using exact financial filters.")
+    knowledge.add_argument("query")
+    knowledge.add_argument("--company", required=True)
+    knowledge.add_argument("--period", required=True)
+    for name in ("scope", "metric", "kind", "currency", "unit"):
+        knowledge.add_argument("--" + name)
+    knowledge.add_argument("--limit", type=int, default=5)
     for name in ("compare", "combined", "growth", "ask", "beat-attribution"):
         command = commands.add_parser(name)
         command.add_argument("--company", required=True)
@@ -162,6 +169,41 @@ def _search(args, parser):
     return 0
 
 
+def _knowledge_search(args, parser):
+    if args.mode != "fixture" or args.retrieval != "keyword" or args.fixture is None:
+        parser.error("Reviewed knowledge search requires --mode fixture --retrieval keyword and --fixture; no fallback was performed.")
+    if args.llm != "none" or args.database is not None:
+        parser.error("This reviewed knowledge command uses local keyword retrieval, without LLM or database execution.")
+    try:
+        from .adapters import FileFixtureAdapter
+        from .knowledge import ReviewedKnowledgeIndex
+        fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        index = ReviewedKnowledgeIndex.from_fixture(fixture)
+        filters = {name: getattr(args, name) for name in ("company", "period", "scope", "metric", "kind", "currency", "unit")}
+        hits = index.search(args.query, **filters, limit=args.limit)
+        result = {"status": "retrieved" if hits else "no_matches", "claims": [], "filters": filters,
+                  "hits": [{"record": _json_value(hit.record), "score": hit.score,
+                            "matching_contexts": _json_value(hit.matching_contexts),
+                            "context_prefix": hit.context_prefix} for hit in hits],
+                  "execution": {"mode": "fixture", "retrieval": index.mode, "context": "pdf_validated",
+                                "no_llm": True, "no_database": True}}
+    except (ValueError, OSError, ImportError) as error:
+        print(f"Reviewed knowledge search failed: {error}", file=sys.stderr)
+        return 2
+    if args.format == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    else:
+        print("Execution: reviewed fixture knowledge; keyword retrieval; LLM: none; database: none.")
+        for hit in hits:
+            print("\nDerived context: " + hit.context_prefix)
+            print("Source quote: " + hit.record.quote)
+            citation = hit.record.citation
+            print(f"{citation.document_name}, p. {citation.page}; {citation.locator}; {citation.link or ''}")
+        if not hits:
+            print("No matching reviewed records. This does not establish that the full corpus lacks an answer.")
+    return 0
+
+
 def _ingest(args, parser):
     if args.mode != "live" or args.database is None or args.fixture is None:
         parser.error("Ingestion requires --mode live, --database and --fixture; no fallback was performed.")
@@ -198,13 +240,15 @@ def main(argv=None):
         return _search(args, parser)
     if args.command == "ingest":
         return _ingest(args, parser)
+    if args.command == "kb-search":
+        return _knowledge_search(args, parser)
     if args.mode == "live" and args.database is None:
         parser.error("Live analytics requires --database; no fallback was performed.")
     if args.mode == "local":
         parser.error("Local mode supports exploratory search only; no fallback was performed.")
     if args.mode == "fixture" and args.database is not None:
         parser.error("Select --mode live to read SQLite; no fallback was performed.")
-    if args.retrieval != "fixture":
+    if args.retrieval != "fixture" and not (args.retrieval == "keyword" and args.command in {"growth", "combined"}):
         parser.error(f"{args.retrieval.capitalize()} retrieval is not implemented in this checkpoint; no fallback was performed.")
     if args.fixture is None:
         parser.error("--fixture is required for original PDF evidence validation.")
@@ -220,6 +264,10 @@ def main(argv=None):
         from .service import ApplicationService
 
         fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        passages = fixture
+        if args.retrieval == "keyword":
+            from .knowledge import KnowledgeGrowthAdapter
+            passages = KnowledgeGrowthAdapter(fixture)
         analytics = fixture
         if args.mode == "live":
             from .sqlite_adapter import SQLiteAnalyticsAdapter
@@ -229,7 +277,7 @@ def main(argv=None):
             selector = GroqPassageSelector(load_groq_key(args.env_file), args.groq_model)
         elif args.llm == "groq" and operation == "compare":
             raise ValueError("Groq selection requires a growth or combined request; no model call was performed.")
-        service = ApplicationService(analytics, fixture, fixture, selector=selector)
+        service = ApplicationService(analytics, fixture, passages, selector=selector)
         if operation == "growth":
             answer = service.growth_answer(args.company, args.period)
         elif operation in ("beat-attribution", "beat_attribution"):

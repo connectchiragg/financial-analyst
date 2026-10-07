@@ -176,6 +176,37 @@ class CliTests(unittest.TestCase):
         self.assertEqual(run.returncode, 2)
         self.assertFalse(database.exists())
 
+    def test_reviewed_knowledge_filters_and_prefixes_precede_ranking(self):
+        flags = ("--mode", "fixture", "--fixture", str(self.fixture), "--retrieval", "keyword", "--format", "json")
+        run = self.run_cli(*flags, "kb-search", "revenue growth", "--company", "Example Pharma", "--period", "1QFY27",
+                           "--scope", "consolidated", "--metric", "net_sales", "--kind", "broker_commentary", "--unit", "INRm")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        result = json.loads(run.stdout)
+        self.assertEqual(result["status"], "retrieved")
+        self.assertEqual(result["claims"], [])
+        self.assertEqual(result["execution"]["context"], "pdf_validated")
+        self.assertTrue(result["execution"]["no_database"])
+        for hit in result["hits"]:
+            self.assertIn("company=Example Pharma", hit["context_prefix"])
+            self.assertIn("period=1QFY27", hit["context_prefix"])
+            self.assertNotIn("company=", hit["record"]["quote"])
+            self.assertTrue(all(context["kind"] == "broker_commentary" for context in hit["matching_contexts"]))
+        wrong = self.run_cli(*flags, "kb-search", "revenue growth", "--company", "Example Pharma", "--period", "1QFY26",
+                             "--kind", "broker_commentary")
+        self.assertEqual(wrong.returncode, 0, wrong.stderr)
+        self.assertEqual(json.loads(wrong.stdout)["status"], "no_matches")
+
+    def test_combined_keyword_path_uses_reviewed_context_and_retains_citations(self):
+        run = self.run_cli("--mode", "fixture", "--fixture", str(self.fixture), "--retrieval", "keyword", "--format", "json",
+                           "combined", "--company", "Example Pharma", "--period", "1QFY27")
+        self.assertEqual(run.returncode, 0, run.stderr)
+        answer = json.loads(run.stdout)
+        self.assertEqual(answer["status"], "answered")
+        self.assertEqual(answer["execution"]["retrieval"], "reviewed_fixture_keyword")
+        self.assertTrue(answer["execution"]["no_llm"])
+        refs = {citation["ref"] for citation in answer["citations"]}
+        self.assertTrue(all(set(claim["evidence_refs"]) <= refs for claim in answer["claims"]))
+
 
 if __name__ == "__main__":
     unittest.main()

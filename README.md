@@ -61,6 +61,20 @@ python -m financial_analyst --mode local --retrieval keyword \
 
 Sources are authenticated and extracted from the same bytes. Results stay within one PDF page, carry stable source-hash references, and expose extraction coverage. Ranking uses BM25 without stemming or synonyms. An empty result means no keyword matches, not proof that the corpus lacks an answer. Semantic retrieval remains unavailable; no fallback occurs.
 
+## Reviewed knowledge preparation and filters
+
+The answerable knowledge index uses only PDF-validated evidence associated with reviewed financial observations and broker commentary. It derives metadata for company, original fiscal period, scope, metric, actual/estimate/forecast kind, currency and observation source unit. A readable prefix aids interpretation; exact metadata filters determine eligibility before ranking. A comparison passage can retain multiple contexts, and every requested filter must match one complete context. Excluded contexts do not contribute to its score.
+
+```sh
+python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
+  --retrieval keyword kb-search "revenue growth" --company "Example Pharma" \
+  --period 1QFY27 --scope consolidated --metric net_sales --kind broker_commentary --unit INRm
+```
+
+Results expose generated `context_prefix` separately from the unchanged source `quote`, with document hash, page and supporting citations. Unit metadata describes the financial observation; a corroborating quote may contain its own rounded amount/unit, which remains in the quote. Empty results mean no matching reviewed records. General sanitation/redaction is not implemented yet; raw exploratory pages do not bypass this reviewed index.
+
+For `growth` and `combined`, `--retrieval keyword` uses this filtered index instead of directly returning all curated passages. Optional `--llm groq` then selects canonical evidence by reference. Semantic retrieval remains unavailable.
+
 ## Intended behavior
 
 - Retrieve cited passages with separately identified keyword and semantic search capabilities.
