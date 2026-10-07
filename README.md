@@ -41,16 +41,16 @@ Mixed or unsupported questions are refused as a whole. The CLI does not answer a
 
 ## Interchangeable inference
 
-Use `--llm mistral` for `growth`, `combined` or semantic retrieval. Set `MISTRAL_API_KEY` in the environment, or pass `--env-file` with a private credential file. The default Mistral model is `mistral-small-latest`; `--model` selects an explicit model. Keep credentials out of commands, fixtures and commits.
+Use `--llm groq` for `growth`, `combined` or semantic retrieval. Set `GROQ_API_KEY` in the environment, or pass `--env-file` with a private credential file. The default Groq model is `openai/gpt-oss-20b`; `--model` selects an explicit model. Keep credentials out of commands, fixtures and commits.
 
 ```sh
 python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
-  --llm mistral --format json combined --company "Example Pharma" --period 1QFY27
+  --llm groq --format json combined --company "Example Pharma" --period 1QFY27
 ```
 
 Selection and retrieval consume a standard `InferencePort`: neutral messages, a named JSON schema and an output-token budget in; content and finish reason out. Provider adapters own wire formats, credentials, model IDs, timeouts, errors and cleanup. Financial services and the calculator do not consume provider SDK objects. Other API formats can implement this port without editing financial logic.
 
-Switch to `--llm groq` for its existing adapter (default `openai/gpt-oss-20b`, credential `GROQ_API_KEY`). The old `--groq-model` flag remains a Groq-only alias for `--model`. Or configure an explicit compatible endpoint:
+Switch to `--llm mistral` for its adapter (default `mistral-small-latest`, credential `MISTRAL_API_KEY`). The old `--groq-model` flag remains a Groq-only alias for `--model`. Or configure an explicit compatible endpoint:
 
 ```sh
 python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
@@ -62,7 +62,7 @@ The compatible adapter appends `/chat/completions` to the API base URL and uses 
 
 Output labels fixture/SQLite analytics, actual retrieval method, provider/model and actual inference invocation separately. Injected transports are labeled `test_double`. The model may select known references or abstain; malformed replies, unknown references, additional claims and API failures cannot produce an answer. Model-authored prose, citations and amounts never enter financial claims. The semantic adapter below adds query-based retrieval after context filters.
 
-Provider-swap tests verify unchanged arithmetic, canonical quotes, citations and refusals across synthetic provider implementations. Mistral transport is tested with synthetic HTTP responses; live Mistral execution awaits a configured credential. Mistral hosted Libraries and Agents/Conversations integration are a separate pending increment, not part of this inference adapter.
+Provider-swap tests verify unchanged arithmetic, canonical quotes, citations and refusals across synthetic provider implementations. Mistral transport is tested with synthetic HTTP responses; live Mistral generation has not been verified. Documents remain local, accessed through our retrieval adapters. Hosted Mistral Libraries and Agents/Conversations are outside the current local retrieval flow.
 
 ## Exploratory keyword search
 
@@ -89,13 +89,27 @@ Results expose generated `context_prefix` separately from the unchanged source `
 
 For `growth` and `combined`, `--retrieval keyword` uses this filtered index instead of directly returning all curated passages. Optional `--llm groq` then selects canonical evidence by reference.
 
-## Bounded semantic retrieval
+## Prepare local knowledge resources
 
-Use `--retrieval semantic --llm mistral` with `kb-search`, `growth` or `combined`. All exact metadata filters run first; The configured inference provider sees every eligible record within the explicit budget and judges relevance by meaning. There is no keyword prefilter, embedding API or vector index. This method suits small reviewed candidate sets; exceeding 32 candidates or the 16,000-character provider request budget fails explicitly without truncating evidence or falling back.
+Prepare a private local bundle from a reviewed, PDF-authenticated fixture. Exact filters run before export. Each resource has one complete financial context, a generated prefix separate from the unchanged quote, canonical source references, context-specific supporting citations and exact source values/labels.
 
 ```sh
 python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
-  --retrieval semantic --llm mistral kb-search "What helped turnover expand?" \
+  prepare-knowledge --company "Example Pharma" --period 1QFY27 --kind broker_commentary \
+  --destination .local/knowledge-ready/example-quarter
+```
+
+The JSON manifest labels `reviewed_fixture` provenance and `local_preparation_only`. This command performs no inference, database read, remote upload, sensitive-data redaction or general PDF sanitation. It defaults to an ignored local directory. Use a new destination for a different bundle; repeated identical content is unchanged, while conflicting files fail without replacement, including files created concurrently during export. No matching reviewed contexts produces no export.
+
+Prepared bundles are inputs for later indexing, not authority to answer financial questions without original-source validation. Current answer retrieval still builds its reviewed index through the source adapter. Unfamiliar PDF extraction and general document onboarding remain pending.
+
+## Bounded semantic retrieval
+
+Use `--retrieval semantic --llm groq` with `kb-search`, `growth` or `combined`. All exact metadata filters run first; The configured inference provider sees every eligible record within the explicit budget and judges relevance by meaning. There is no keyword prefilter, embedding API or vector index. This method suits small reviewed candidate sets; exceeding 32 candidates or the 16,000-character provider request budget fails explicitly without truncating evidence or falling back.
+
+```sh
+python -m financial_analyst --mode fixture --fixture path/to/reviewed-fixture.json \
+  --retrieval semantic --llm groq kb-search "What helped turnover expand?" \
   --company "Example Pharma" --period 1QFY27 --metric net_sales --kind broker_commentary
 ```
 

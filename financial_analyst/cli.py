@@ -121,6 +121,13 @@ def _parser():
     search.add_argument("query")
     search.add_argument("--limit", type=int, default=5)
     commands.add_parser("ingest", help="Validate and transactionally ingest a reviewed source bundle into SQLite.")
+    prepare = commands.add_parser("prepare-knowledge", help="Prepare exactly filtered reviewed resources for a local knowledge indexing.")
+    prepare.add_argument("--company", required=True)
+    prepare.add_argument("--period", required=True)
+    for name in ("scope", "metric", "kind", "currency", "unit"):
+        prepare.add_argument("--" + name)
+    prepare.add_argument("--destination", type=Path, default=Path(".local/knowledge-ready"),
+                         help="Private local export directory; use a new directory for a different bundle.")
     knowledge = commands.add_parser("kb-search", help="Search contextualized evidence using exact financial filters.")
     knowledge.add_argument("query")
     knowledge.add_argument("--company", required=True)
@@ -262,6 +269,40 @@ def _knowledge_search(args, parser):
     return 0
 
 
+def _prepare_knowledge(args, parser):
+    if args.mode != "fixture" or args.fixture is None:
+        parser.error("Knowledge preparation requires --mode fixture and --fixture for original PDF validation.")
+    if args.database is not None or args.llm != "none" or args.retrieval != "fixture":
+        parser.error("Knowledge preparation applies context filters locally; it does not read SQLite, rank evidence or invoke inference.")
+    try:
+        _provider_config(args)
+        from .adapters import FileFixtureAdapter
+        from .knowledge_preparation import prepare_knowledge_groups, write_prepared_knowledge
+        fixture = FileFixtureAdapter(args.fixture, source_path=args.source_pdf)
+        filters = {name: getattr(args, name) for name in ("company", "period", "scope", "metric", "kind", "currency", "unit")}
+        groups = prepare_knowledge_groups(fixture, **filters)
+        manifest = write_prepared_knowledge(groups, args.destination) if groups else None
+        result = {
+            "status": "prepared" if groups else "no_matches", "claims": [], "filters": filters,
+            "manifest": str(manifest.resolve()) if manifest is not None else None,
+            "counts": {"groups": len(groups), "documents": sum(len(group.documents) for group in groups)},
+            "execution": {"mode": "fixture", "provenance": "reviewed_fixture", "operation": "local_preparation_only",
+                          "remote_upload": False, "sanitization": "not_performed", "no_llm": True, "no_database": True},
+        }
+    except (ValueError, OSError, ImportError) as error:
+        print(f"Knowledge preparation failed: {error}", file=sys.stderr)
+        return 2
+    if args.format == "json":
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+    elif manifest is not None:
+        print(f"Prepared {result['counts']['documents']} reviewed resources in {result['counts']['groups']} exact context groups.")
+        print("Private local manifest: " + result["manifest"])
+        print("Execution: PDF-validated reviewed fixture; preparation only; remote upload, sanitization, LLM and database: none.")
+    else:
+        print("No matching reviewed contexts. No export or remote upload was performed.")
+    return 0
+
+
 def _ingest(args, parser):
     if args.mode != "live" or args.database is None or args.fixture is None:
         parser.error("Ingestion requires --mode live, --database and --fixture; no fallback was performed.")
@@ -299,6 +340,8 @@ def main(argv=None):
         return _search(args, parser)
     if args.command == "ingest":
         return _ingest(args, parser)
+    if args.command == "prepare-knowledge":
+        return _prepare_knowledge(args, parser)
     if args.command == "kb-search":
         return _knowledge_search(args, parser)
     if args.mode == "live" and args.database is None:
