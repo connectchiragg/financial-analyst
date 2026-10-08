@@ -199,9 +199,18 @@ def render_answer(answer,*,diagnostics=False):
     if answer.status!='answered':return "I'm sorry, I don't have an answer to that from these documents."
     lines=[]
     multiple_companies=len({claim.values['company']for claim in answer.claims})>1
+    # Share only identical, explicit context. Mixed scopes/periods and ranked
+    # rows keep their own labels; source quotations retain their full wording.
+    contexts={tuple(claim.values.get(key) for key in ('company','period','scope'))
+        for claim in answer.claims}
+    shared_context=(len(answer.claims)>1 and len(contexts)==1 and all(
+        claim.kind!='ranked_revenue_yoy' and not (
+            claim.kind=='source_fact' and claim.values['quote'] is not None)
+        for claim in answer.claims))
     for claim in answer.claims:
         value=claim.values
         context=' '.join(str(value[key])for key in ('company','period','scope') if value.get(key))
+        prefix='' if shared_context else context+': '
         metric=value.get('metric','net_sales').replace('_',' ')
         if claim.kind=='source_fact':
             if value['quote'] is not None:
@@ -214,17 +223,17 @@ def render_answer(answer,*,diagnostics=False):
                         'broker_valuation':'broker valuation'}.get(value.get('kind'))
                 amount=' '.join(str(value[key])for key in ('currency','value_text','unit') if value.get(key)is not None)
                 label=metric+(' ('+status+')' if status else '')
-                lines.append(f'{context}: {label} {amount}.')
+                lines.append(f'{prefix}{label} {amount}.')
         elif claim.kind=='metric_comparison':
             delta=value['delta_millions']
             direction='above' if delta>0 else 'below' if delta<0 else 'equal to'
-            lines.append(f"{context}: {metric} actual {value['currency']} {_number(value['actual_millions'])} million "
+            lines.append(f"{prefix}{metric} actual {value['currency']} {_number(value['actual_millions'])} million "
                 f"versus broker estimate {_number(value['estimate_millions'])} million; {direction} estimate by "
                 f"{_number(delta.copy_abs())} million ({_number(value['variance_percent'].copy_abs(),2)}%).")
         elif claim.kind in {'metric_estimate_change','metric_yoy_change'}:
             reference='broker estimate' if claim.kind=='metric_estimate_change' else value['reference_period']+' actual'
             currency=(value.get('currency')+' ') if value.get('currency') else ''
-            lines.append(f"{context}: {metric} actual {currency}{_number(value['actual'])} {value['unit']} "
+            lines.append(f"{prefix}{metric} actual {currency}{_number(value['actual'])} {value['unit']} "
                 f"versus {reference} {_number(value['reference'])} {value['unit']}; "
                 f"change {_number(value['delta'])} {value['delta_unit']} ({_number(value['relative_percent'],2)}%).")
             if value['basis_points']is not None:
@@ -235,7 +244,7 @@ def render_answer(answer,*,diagnostics=False):
                 f"versus prior {_number(value['prior_millions'])} million.")
         elif claim.kind=='source_table_reconciliation':
             currency,unit=value['currency'],value['unit']
-            lines.append(f"{context}: EBITDA {currency} {_number(value['valuation_ebitda'])} {unit} "
+            lines.append(f"{prefix}EBITDA {currency} {_number(value['valuation_ebitda'])} {unit} "
                 f"× {_number(value['valuation_multiple'])}x gives EV {_number(value['computed_ev'])} {unit}; "
                 f"the printed EV is {_number(value['printed_ev'])} {unit} "
                 f"(computed minus printed: {_number(value['ev_difference'])} {unit}).")
@@ -261,7 +270,9 @@ def render_answer(answer,*,diagnostics=False):
                 originals.append(' '.join(str(part) for part in
                     (source['period'],role,source['currency'],source['value_text'],source['unit'])
                     if part is not None))
-            lines.append(context+': original source inputs: '+'; '.join(originals)+'.')
+            lines.append(prefix+'original source inputs: '+'; '.join(originals)+'.')
+    if shared_context:
+        return context+':\n\n'+'\n'.join('- '+line for line in lines)+'\n\n'+_source_list(answer)
     return '\n\n'.join((*lines,_source_list(answer)))
 
 

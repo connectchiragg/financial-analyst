@@ -110,6 +110,37 @@ class CorpusCLITests(unittest.TestCase):
         self.assertIn('Synthetic missing-context diagnostic.',
             corpus_cli.render_answer(answer,diagnostics=True))
 
+    def test_numeric_results_share_identical_context_without_changing_claims(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-revenue',))
+        actual=answer.claims[0]
+        forecast=replace(actual,values={**actual.values,'kind':'broker_forecast',
+            'value_text':'1300'})
+        answer=replace(answer,claims=(actual,forecast))
+        original=json.dumps(corpus_cli._json_value(answer),sort_keys=True)
+        rendered=corpus_cli.render_answer(answer)
+        context=' '.join(str(actual.values[key]) for key in ('company','period','scope')
+            if actual.values.get(key))
+        self.assertEqual(rendered.count(context),1)
+        self.assertIn('\n\n- net sales (actual)',rendered)
+        self.assertIn('\n- net sales (broker forecast) INR 1300 million.',rendered)
+        self.assertEqual(rendered.count('Sources:'),1)
+        self.assertEqual(json.dumps(corpus_cli._json_value(answer),sort_keys=True),original)
+
+    def test_different_company_period_or_scope_keeps_each_numeric_context(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-revenue',))
+        actual=answer.claims[0]
+        for difference in ({'company':'Other Example'},{'period':'FY28'},
+                {'scope':None}):
+            with self.subTest(difference=difference):
+                other=replace(actual,values={**actual.values,**difference})
+                rendered=corpus_cli.render_answer(replace(answer,claims=(actual,other)))
+                for claim in (actual,other):
+                    context=' '.join(str(claim.values[key]) for key in ('company','period','scope')
+                        if claim.values.get(key))
+                    self.assertIn(context+': net sales',rendered)
+
     def test_corpus_engine_and_mode_are_explicit_and_no_unknown_engine_falls_back(self):
         self.config_path.write_text(json.dumps({'engine':'corpus','mode':'fixture',
             'proof_pack':self.config['proof_pack'].name,'catalog':self.config['catalog'].name,

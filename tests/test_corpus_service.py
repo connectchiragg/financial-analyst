@@ -89,7 +89,8 @@ class CorpusServiceTests(unittest.TestCase):
             self.assertIn(original,text)
         self.assertIn('1,250 million',text)
         self.assertIn('1QFY26 prior actual',text)
-        self.assertIn('Example Pharma 1QFY27 consolidated: original source inputs:',text)
+        self.assertEqual(text.count('Example Pharma 1QFY27 consolidated:'),1)
+        self.assertIn('original source inputs:',text)
         self.assertEqual({ref for claim in answer.claims for ref in claim.evidence_refs},
                          {citation.ref for citation in answer.citations})
 
