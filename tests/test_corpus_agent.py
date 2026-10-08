@@ -57,6 +57,44 @@ class CorpusAgentTests(unittest.TestCase):
         self.assertEqual(len(inference.calls),2)
         self.assertEqual(answer.execution['llm']['mode'],'test_double')
         self.assertEqual(answer.execution['agent']['local_tool_calls'],1)
+        selections=inference.calls[1].schema['properties']['selections']
+        self.assertEqual(selections['minItems'],1);self.assertEqual(selections['maxItems'],1)
+        item=selections['items']
+        self.assertEqual(item['properties']['call_index']['enum'],[0])
+        source_ids=item['properties']['fact_ids']
+        self.assertEqual(source_ids['minItems'],1)
+        self.assertEqual(source_ids['items']['enum'],['example-revenue'])
+
+    def test_coverage_uses_reviewed_quarter_kind_not_forecast_year_audit_labels(self):
+        for quarter,kind in (('1Q','reported_actual'),('1QE','broker_estimate')):
+            with self.subTest(quarter=quarter,kind=kind):
+                pack_path,catalog_path,pack,self.pdf=create_grouped_corpus(Path(self.directory.name),selected_quarter=quarter)
+                fact=pack['facts'][0]
+                if quarter=='1QE':
+                    fact['kind']=kind;fact['raw_labels']['kind']='1QE'
+                    fact['raw_labels']['period']=['FY27E','1QE']
+                    fact['proof']['bindings']['kind']='column'
+                    fact['proof']['reported_status_refs']=[]
+                    pack_path.write_text(json.dumps(pack))
+                self.adapter=ReviewedCorpusAdapter(pack_path,catalog_path);self.service=CorpusService(self.adapter)
+                status='reported' if kind=='reported_actual' else 'estimated'
+                question=f'What was Example Pharma consolidated {status} revenue in INR for 1Q FY27?'
+                answer,inference=self.run_agent(plan(),decision(),question=question)
+                self.assertEqual(answer.status,'answered')
+                payload=json.loads(inference.calls[1].messages[1].content)
+                candidate=payload['canonical_tools'][0]['claims'][0]
+                self.assertEqual(candidate['values']['kind'],kind)
+                self.assertEqual(candidate['values']['period'],'1QFY27')
+                self.assertEqual(candidate['values']['scope'],'consolidated')
+                self.assertEqual(candidate['values']['currency'],'INR')
+                self.assertEqual(candidate['evidence_refs'],list(answer.claims[0].evidence_refs))
+                self.assertNotIn('raw_labels',json.dumps(payload))
+                self.assertEqual(payload['question'],question)
+                self.assertEqual(payload['question_context'],{'periods':['1QFY27'],
+                    'scope':['consolidated'],'kind':[kind],'currency':['INR']})
+                self.assertEqual(answer.claims[0].values['raw_labels']['period'],['FY27E',quarter])
+                self.assertEqual(answer.claims[0].values['kind'],kind)
+                self.assertIn('Do not recategorize an actual quarter',inference.calls[1].messages[0].content)
 
     def test_runtime_rejects_unknown_metric_and_filter_despite_provider_schema(self):
         for changes in ({'metrics':['invented']},{'period':'2QFY99'},{'scope':'wrong'},
@@ -370,10 +408,43 @@ class CorpusAgentTests(unittest.TestCase):
         memory.companies=self.adapter.companies
         self.service=CorpusService(memory)
         item=request();item.update(tool='compare',include_yoy=True)
-        answer,_=self.run_agent(plan(item),decision(()))
+        answer,inference=self.run_agent(plan(item),decision(()))
         self.assertEqual(answer.status,'answered')
         self.assertEqual(str(answer.claims[0].values['delta_millions']),'20')
         self.assertEqual(answer.claims[1].values['relative_percent'],Decimal('50'))
+        selection=inference.calls[1].schema['properties']['selections']['items']
+        self.assertEqual(selection['properties']['call_index']['enum'],[0])
+        self.assertEqual(selection['properties']['fact_ids']['maxItems'],0)
+        rejected,_=self.run_agent(plan(item),decision(('example-revenue',)))
+        self.assert_refused(rejected)
+
+    def test_mixed_coverage_schema_binds_source_and_calculation_rules_to_call_index(self):
+        actual,quote=self.adapter.read_facts()
+        estimate=replace(actual,fact_id='synthetic-estimate',value_text='100',kind='broker_estimate')
+        memory=ReviewedMemoryAdapter(self.adapter,(actual,estimate,quote))
+        memory.sources=self.adapter.sources;memory.companies=self.adapter.companies
+        self.service=CorpusService(memory)
+        calculation=request();calculation['tool']='compare'
+        source=request();source['metrics']=['revenue_growth_reason']
+        proposals={'requests':[calculation,source],'unsupported_parts':[]}
+        coverage={'complete':True,'unsupported_parts':[],
+                  'selections':[{'call_index':0,'fact_ids':[]},{'call_index':1,'fact_ids':['example-growth']}]}
+        answer,inference=self.run_agent(proposals,coverage,
+            question='Compare Example Pharma actual revenue with estimate and explain growth in 1QFY27.')
+        self.assertEqual(answer.status,'answered')
+        selections=inference.calls[1].schema['properties']['selections']
+        self.assertEqual(selections['minItems'],2);self.assertEqual(selections['maxItems'],2)
+        calculated,lookup=selections['items']['anyOf']
+        self.assertEqual(calculated['properties']['call_index']['enum'],[0])
+        self.assertEqual(calculated['properties']['fact_ids']['maxItems'],0)
+        self.assertEqual(lookup['properties']['call_index']['enum'],[1])
+        self.assertEqual(lookup['properties']['fact_ids']['minItems'],1)
+        self.assertEqual(lookup['properties']['fact_ids']['items']['enum'],['example-growth'])
+        duplicate={'complete':True,'unsupported_parts':[],
+                   'selections':[{'call_index':0,'fact_ids':[]},{'call_index':0,'fact_ids':[]}]}
+        rejected,_=self.run_agent(proposals,duplicate,
+            question='Compare Example Pharma actual revenue with estimate and explain growth in 1QFY27.')
+        self.assert_refused(rejected)
 
     def test_calculation_passes_explicit_source_context_to_canonical_service(self):
         actual,quote=self.adapter.read_facts()
@@ -421,8 +492,11 @@ class CorpusAgentTests(unittest.TestCase):
         values=payload['canonical_tools'][0]['claims'][0]['values']
         self.assertEqual(values['quote'],canonical)
         self.assertNotIn('quote_preview',values)
+        self.assertNotIn('raw_labels',values)
+        self.assertIsNone(values['scope']);self.assertIsNone(values['kind'])
         self.assertIn('is not assured.',values['quote'][320:])
         self.assertEqual(answer.claims[0].values['quote'],canonical)
+        self.assertIn('raw_labels',answer.claims[0].values)
 
     def test_empty_or_long_questions_never_call_inference(self):
         for question in ('',' '*3,'x'*2001):

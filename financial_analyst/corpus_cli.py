@@ -5,6 +5,7 @@ import argparse
 from dataclasses import asdict
 import json
 from pathlib import Path
+import re
 
 from .cli import _citation_text, _json_value, _number
 from .corpus_adapter import FactFilter, ReviewedCorpusAdapter, SQLiteCorpusAdapter, import_reviewed
@@ -88,7 +89,7 @@ def _coverage_banner(coverage,inference):
     )
 
 
-def render_answer(answer):
+def render_diagnostic_answer(answer):
     execution=answer.execution
     llm=execution.get('llm',{})
     inference='none' if llm.get('mode')=='not_called' else f"{llm.get('mode')} {llm.get('provider')} ({llm.get('model')})"
@@ -166,7 +167,91 @@ def render_answer(answer):
     return '\n\n'.join(lines)
 
 
-def run_chat(config,mode='live',input_fn=input,output_fn=print):
+def _display_quote(quote):
+    # Conditions can span sentences. Only normalize layout, never select or
+    # discard canonical source content in the presentation layer.
+    return ' '.join(re.sub(r'[\uf06e\u25a0\u2022]',' ',quote).split())
+
+
+def _source_list(answer):
+    refs=tuple(dict.fromkeys(ref for claim in answer.claims for ref in claim.evidence_refs))
+    by_ref={citation.ref:citation for citation in answer.citations}
+    if set(refs)!=set(by_ref):
+        raise ValueError('Rendered claims require closed source citations.')
+    grouped={}
+    for ref in refs:
+        citation=by_ref[ref]
+        key=citation.link or citation.document_name
+        group=grouped.setdefault(key,{'name':citation.document_name,'link':citation.link,'pages':set()})
+        group['pages'].add(citation.page)
+    lines=[]
+    for group in grouped.values():
+        pages=', '.join(str(page)for page in sorted(group['pages']))
+        line=f"- {group['name']}, pp. {pages}"
+        if group['link']:line+=': '+group['link']
+        lines.append(line)
+    return 'Sources:\n'+'\n'.join(lines)
+
+
+def render_answer(answer,*,diagnostics=False):
+    """Plain canonical answers; detailed execution remains an opt-in view."""
+    if diagnostics:return render_diagnostic_answer(answer)
+    if answer.status!='answered':return 'Unable to answer: '+str(answer.reason)
+    lines=[]
+    multiple_companies=len({claim.values['company']for claim in answer.claims})>1
+    for claim in answer.claims:
+        value=claim.values
+        context=' '.join(str(value[key])for key in ('company','period','scope') if value.get(key))
+        metric=value.get('metric','net_sales').replace('_',' ')
+        if claim.kind=='source_fact':
+            if value['quote'] is not None:
+                quote=_display_quote(value['quote'])
+                lines.append((value['company']+': ' if multiple_companies else '')+quote)
+            else:
+                status={'reported_actual':'actual','broker_estimate':'broker estimate',
+                        'broker_forecast':'broker forecast'}.get(value.get('kind'))
+                amount=' '.join(str(value[key])for key in ('currency','value_text','unit') if value.get(key)is not None)
+                label=metric+(' ('+status+')' if status else '')
+                lines.append(f'{context}: {label} {amount}.')
+        elif claim.kind=='metric_comparison':
+            delta=value['delta_millions']
+            direction='above' if delta>0 else 'below' if delta<0 else 'equal to'
+            lines.append(f"{context}: {metric} actual {value['currency']} {_number(value['actual_millions'])} million "
+                f"versus broker estimate {_number(value['estimate_millions'])} million; {direction} estimate by "
+                f"{_number(delta.copy_abs())} million ({_number(value['variance_percent'].copy_abs(),2)}%).")
+        elif claim.kind in {'metric_estimate_change','metric_yoy_change'}:
+            reference='broker estimate' if claim.kind=='metric_estimate_change' else value['reference_period']+' actual'
+            currency=(value.get('currency')+' ') if value.get('currency') else ''
+            lines.append(f"{context}: {metric} actual {currency}{_number(value['actual'])} {value['unit']} "
+                f"versus {reference} {_number(value['reference'])} {value['unit']}; "
+                f"change {_number(value['delta'])} {value['delta_unit']} ({_number(value['relative_percent'],2)}%).")
+            if value['basis_points']is not None:
+                lines.append(f"Margin/rate change: {_number(value['basis_points'])} basis points.")
+        elif claim.kind=='ranked_revenue_yoy':
+            lines.append(f"{value['rank']}. {context}: revenue grew {_number(value['yoy_percent'],2)}% YoY "
+                f"versus {value['prior_period']}; actual {value['currency']} {_number(value['actual_millions'])} million "
+                f"versus prior {_number(value['prior_millions'])} million.")
+        elif claim.kind=='source_table_reconciliation':
+            currency,unit=value['currency'],value['unit']
+            lines.append(f"{context}: EBITDA {currency} {_number(value['valuation_ebitda'])} {unit} "
+                f"× {_number(value['valuation_multiple'])}x gives EV {_number(value['computed_ev'])} {unit}; "
+                f"the printed EV is {_number(value['printed_ev'])} {unit} "
+                f"(computed minus printed: {_number(value['ev_difference'])} {unit}).")
+            lines.append(f"Printed cash: {currency} {_number(value['printed_cash'])} {unit}; "
+                f"equity: {_number(value['printed_equity'])} {unit}; shares: {_number(value['printed_shares_millions'])} million. "
+                f"Equity divided by shares gives {currency} {_number(value['computed_per_share'],2)} per share, "
+                f"versus the printed target of {_number(value['printed_target'])} "
+                f"(difference: {_number(value['per_share_difference'],2)} per share).")
+            if value['source_consistency']=='unreconciled_printed_values':
+                lines.append('The printed values do not reconcile exactly; accounting scope is unspecified.')
+            elif value['source_consistency']=='arithmetic_matches':
+                lines.append('These calculations match the printed values; accounting scope is unspecified.')
+            else:raise ValueError('Unknown source reconciliation status cannot be rendered.')
+        else:raise ValueError('Unknown canonical claim cannot be rendered.')
+    return '\n\n'.join((*lines,_source_list(answer)))
+
+
+def run_chat(config,mode='live',input_fn=input,output_fn=print,*,diagnostics=False):
     inference=None
     try:
         service=build_service(config,mode)
@@ -177,7 +262,11 @@ def run_chat(config,mode='live',input_fn=input,output_fn=print):
         inference=create_inference(config['provider'],model=config.get('model'),env_file=config.get('env_file'),
                                    base_url=config.get('base_url'),api_key_env=config.get('api_key_env'),timeout=30)
         agent=CorpusToolAgent(inference,service)
-        for line in _coverage_banner(coverage,inference):
+        company_count=len(coverage['companies'])
+        noun='company' if company_count==1 else 'companies'
+        banner=_coverage_banner(coverage,inference) if diagnostics else (
+            f"Reports available for {company_count} {noun}. Ask about a company, period, or metric.",)
+        for line in banner:
             output_fn(line)
         output_fn('Ask a question. Type /quit to exit.')
         while True:
@@ -188,7 +277,7 @@ def run_chat(config,mode='live',input_fn=input,output_fn=print):
                 return 2
             if not isinstance(question,str) or not question.strip():continue
             if question.strip().casefold()=='/quit':return 0
-            try:output_fn(render_answer(agent.answer(question)))
+            try:output_fn(render_answer(agent.answer(question),diagnostics=diagnostics))
             except KeyboardInterrupt:return 0
             except Exception:output_fn('No answer produced. Check source integrity and provider availability.')
     except KeyboardInterrupt:
@@ -207,6 +296,7 @@ def main(argv=None):
     parser.add_argument('--config',type=Path,default=DEFAULT_CONFIG)
     parser.add_argument('--mode',choices=('fixture','live'))
     parser.add_argument('--format',choices=('text','json'),default='text')
+    parser.add_argument('--diagnostics',action='store_true',help='Show detailed execution and source labels.')
     commands=parser.add_subparsers(dest='command')
     commands.add_parser('chat')
     commands.add_parser('ingest',help='Import explicitly approved source-proof records transactionally.')
@@ -229,10 +319,10 @@ def main(argv=None):
                                        base_url=config.get('base_url'),api_key_env=config.get('api_key_env'),timeout=30)
             try:result=CorpusToolAgent(inference,service).answer(args.question)
             finally:inference.close()
-            print(json.dumps(_json_value(result),indent=2,ensure_ascii=False) if args.format=='json' else render_answer(result))
+            print(json.dumps(_json_value(result),indent=2,ensure_ascii=False) if args.format=='json' else render_answer(result,diagnostics=args.diagnostics))
             return 0 if result.status=='answered' else 1
         else:
-            return run_chat(config,mode)
+            return run_chat(config,mode,diagnostics=args.diagnostics)
         print(json.dumps(_json_value(result),indent=2,ensure_ascii=False))
         return 0
     except KeyboardInterrupt:return 0

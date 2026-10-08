@@ -229,6 +229,11 @@ class GroqInference:
     def infer(self, request: InferenceRequest) -> InferenceResponse:
         self.execution = {"provider": self.provider, "model": self.model, "mode": "not_called"}
         payload = _payload(request, self.model, "max_completion_tokens")
+        # These exact Groq models default to medium reasoning, which can use
+        # the bounded completion budget before strict-schema metadata appears.
+        # Keep this provider wire policy out of the standard inference request.
+        if self.model in {"openai/gpt-oss-20b", "openai/gpt-oss-120b"}:
+            payload["reasoning_effort"] = "low"
         self.execution.update(mode=self.mode, outcome="attempted")
         try:
             result = self._client.chat.completions.create(**payload)

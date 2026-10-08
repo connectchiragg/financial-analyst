@@ -230,3 +230,7 @@ python -m financial_analyst.chat
 ```
 
 The session reads a private `.local/analyst-config.json` and prompts repeatedly for questions. Type `/quit`, send EOF or use Ctrl+C to exit. File paths resolve relative to the config file. Provider credentials stay in the configured external environment file. An explicit `engine: corpus` selects the cross-company path above. A legacy configuration without that engine uses its reviewed fixture, optional SQLite database, company and fiscal period, and remains limited to that bound context.
+
+Corpus answers display readable source statements or deterministic calculations, with citations at the bottom. Use `python -m financial_analyst.chat --diagnostics` for execution, provider, database and provenance details. JSON output retains the full audit data.
+
+OpenRouter can use the existing `openai-compatible` adapter: set `base_url` to `https://openrouter.ai/api/v1`, an explicit supported `model`, `api_key_env` to `OPENROUTER_API_KEY`, and `env_file` to a private credential file in the session configuration. Choose that configuration with `--config`; providers are never switched automatically. Successful authentication alone does not establish answer coverage.

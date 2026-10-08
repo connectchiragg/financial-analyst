@@ -80,8 +80,46 @@ class InferenceTests(unittest.TestCase):
             payload = json.loads(calls[0].content)
             self.assertEqual(payload["max_tokens"], 1024)
             self.assertNotIn("max_completion_tokens", payload)
+            self.assertNotIn("reasoning_effort", payload)
             self.assertEqual(payload["response_format"]["json_schema"]["schema"], SCHEMA)
             self.assertTrue(payload["response_format"]["json_schema"]["strict"])
+
+    def test_groq_reasoning_policy_is_transported_only_for_exact_supported_models(self):
+        for model in ('openai/gpt-oss-20b','openai/gpt-oss-120b',
+                      'openai/gpt-oss-20b-v2','openai/gpt-oss-unknown','other-model'):
+            with self.subTest(model=model):
+                calls=[]
+                def transport(req):
+                    calls.append(json.loads(req.content))
+                    return httpx.Response(200,json=completion())
+                with patch('financial_analyst.inference.httpx.HTTPTransport',
+                           return_value=httpx.MockTransport(transport)):
+                    adapter=GroqInference('synthetic-key',model=model)
+                    try:
+                        adapter.infer(request(max_output_tokens=777))
+                    finally:
+                        adapter.close()
+                self.assertEqual(len(calls),1)
+                payload=calls[0]
+                if model in {'openai/gpt-oss-20b','openai/gpt-oss-120b'}:
+                    self.assertEqual(payload['reasoning_effort'],'low')
+                else:
+                    self.assertNotIn('reasoning_effort',payload)
+                self.assertEqual(payload['max_completion_tokens'],777)
+                self.assertEqual(payload['response_format']['json_schema']['schema'],SCHEMA)
+                self.assertTrue(payload['response_format']['json_schema']['strict'])
+
+    def test_groq_reasoning_policy_does_not_leak_to_compatible_provider(self):
+        calls=[]
+        def transport(req):
+            calls.append(json.loads(req.content))
+            return httpx.Response(200,json=completion())
+        with httpx.Client(transport=httpx.MockTransport(transport)) as client:
+            adapter=OpenAICompatibleInference('synthetic-key','openai/gpt-oss-20b',
+                'https://example.test/v1',client=client)
+            adapter.infer(request())
+        self.assertNotIn('reasoning_effort',calls[0])
+        self.assertEqual(calls[0]['max_tokens'],1024)
 
     def test_incomplete_finish_is_returned_for_business_rejection(self):
         adapter = GroqInference(client=GroqClient(result=completion(finish_reason="length")))
@@ -102,6 +140,7 @@ class InferenceTests(unittest.TestCase):
             self.assertEqual(adapter.execution, {"provider": "mistral", "model": "mistral-small-latest",
                                                  "mode": "test_double", "outcome": "returned"})
             self.assertEqual(json.loads(calls[0].content)["model"], "mistral-small-latest")
+            self.assertNotIn('reasoning_effort',json.loads(calls[0].content))
 
     def test_malformed_provider_responses_are_safe_errors(self):
         for result in [{}, {"choices": []}, {"choices": completion()["choices"] * 2},

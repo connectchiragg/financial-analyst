@@ -79,7 +79,7 @@ def _service(config):
     return ApplicationService(analytics, fixture, passages)
 
 
-def run_chat(config_path, input_fn=input, output_fn=print) -> int:
+def run_chat(config_path, input_fn=input, output_fn=print, *, diagnostics=False) -> int:
     """Keep one provider open, resetting the agent's request state each question.
 
     The configured financial context is never changed by a question. The agent
@@ -91,7 +91,8 @@ def run_chat(config_path, input_fn=input, output_fn=print) -> int:
         config = _load_config(config_path)
         if config.get("engine") == "corpus":
             from .corpus_cli import run_chat as run_corpus_chat
-            return run_corpus_chat(config, mode=config["mode"], input_fn=input_fn, output_fn=output_fn)
+            return run_corpus_chat(config, mode=config["mode"], input_fn=input_fn, output_fn=output_fn,
+                                   diagnostics=diagnostics)
         service = _service(config)
         inference = create_inference(config["provider"], model=config.get("model"),
                                      env_file=config.get("env_file"), base_url=config.get("base_url"),
@@ -149,8 +150,9 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description="Ask source-backed questions in a terminal session.")
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG,
                         help="Private session configuration; file paths resolve relative to this file.")
+    parser.add_argument('--diagnostics',action='store_true',help='Show detailed corpus execution and source labels.')
     args = parser.parse_args(argv)
-    return run_chat(args.config)
+    return run_chat(args.config,diagnostics=True) if args.diagnostics else run_chat(args.config)
 
 
 if __name__ == "__main__":

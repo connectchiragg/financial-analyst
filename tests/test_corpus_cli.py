@@ -73,11 +73,12 @@ class CorpusCLITests(unittest.TestCase):
         with patch.object(corpus_cli,'create_inference',return_value=inference):
             code=corpus_cli.run_chat(self.config,input_fn=lambda prompt:next(questions),output_fn=output.append)
         self.assertEqual(code,0)
-        self.assertEqual(output[0],'Available reviewed records: 1 company; 2 metrics.')
+        self.assertEqual(output[0],'Reports available for 1 company. Ask about a company, period, or metric.')
         self.assertIn('Ask a question. Type /quit to exit.',output)
         self.assertIn('1,200.00000000000000000000',output[-1].replace('1200.','1,200.'))
-        self.assertIn('sqlite_corpus',output[-1])
-        self.assertIn('Original source labels',output[-1])
+        self.assertNotIn('sqlite_corpus',output[-1])
+        self.assertNotIn('Original source labels',output[-1])
+        self.assertIn('Sources:',output[-1])
         self.assertEqual(len(inference.calls),2)
         inference.close.assert_called_once()
 
@@ -94,9 +95,12 @@ class CorpusCLITests(unittest.TestCase):
         service=corpus_cli.build_service(self.config,'fixture')
         answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-growth',))
         rendered=corpus_cli.render_answer(answer)
-        self.assertIn('scope not specified',rendered)
+        self.assertNotIn('scope not specified',rendered)
+        self.assertNotIn('standalone',rendered)
+        self.assertNotIn('consolidated',rendered)
         self.assertIn(answer.claims[0].values['quote'],rendered)
-        self.assertIn('Source provenance: reviewed_proof_pack',rendered)
+        self.assertNotIn('Source provenance:',rendered)
+        self.assertIn('Sources:',rendered)
 
     def test_corpus_engine_and_mode_are_explicit_and_no_unknown_engine_falls_back(self):
         self.config_path.write_text(json.dumps({'engine':'corpus','mode':'fixture',
@@ -135,7 +139,7 @@ class CorpusCLITests(unittest.TestCase):
                     if isinstance(ending,BaseException):raise ending
                     return ending
                 with patch.object(corpus_cli,'create_inference',return_value=inference):
-                    code=corpus_cli.run_chat(self.config,mode='fixture',input_fn=read,output_fn=output.append)
+                    code=corpus_cli.run_chat(self.config,mode='fixture',input_fn=read,output_fn=output.append,diagnostics=True)
                 self.assertEqual(code,2 if isinstance(ending,RuntimeError) else 0)
                 inference.close.assert_called_once()
                 self.assertFalse(inference.calls)
@@ -188,7 +192,7 @@ class CorpusCLITests(unittest.TestCase):
             'fact_ids':('synthetic-valuation',),'evidence_refs':('valuation',)}
         answer=Answer('answered',(Claim('source_table_reconciliation',values,('valuation',)),),
                       citations=(citation,),execution=service._execution())
-        rendered=corpus_cli.render_answer(answer)
+        rendered=corpus_cli.render_answer(answer,diagnostics=True)
         self.assertIn('scope not specified; valuation reconciliation',rendered)
         self.assertIn('computed EV INR 650.0 million; printed EV INR 651 million',rendered)
         self.assertIn('difference (computed minus printed) INR -1.0 million',rendered)
@@ -202,6 +206,92 @@ class CorpusCLITests(unittest.TestCase):
         self.assertIn('Per-share calculations are rounded to two decimals',rendered)
         self.assertNotIn('Calculated percentages',rendered)
         self.assertNotIn('net sales',rendered)
+
+    def test_simple_margin_display_retains_full_quote_cross_sentence_conditions_and_answer(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-growth',))
+        quote=('Volume growth improved. Margin remains under pressure in 2Q and normalizes '
+            'in 2H if input costs ease. \uf06e Further price hikes are under evaluation. '
+            'Commodity costs ease only if geopolitical conditions stabilize. '
+            'This depends on demand. That recovery is not assured. We estimate')
+        claim=replace(answer.claims[0],values={**answer.claims[0].values,'metric':'margin_outlook','quote':quote})
+        answer=replace(answer,claims=(claim,))
+        original=json.dumps(corpus_cli._json_value(answer),sort_keys=True)
+        rendered=corpus_cli.render_answer(answer)
+        self.assertIn('Margin remains under pressure in 2Q and normalizes in 2H if input costs ease.',rendered)
+        self.assertIn('Further price hikes are under evaluation.',rendered)
+        self.assertIn('Commodity costs ease only if geopolitical conditions stabilize.',rendered)
+        self.assertIn('Volume growth improved',rendered)
+        self.assertIn('This depends on demand. That recovery is not assured.',rendered)
+        self.assertIn('We estimate',rendered)
+        self.assertNotIn('\uf06e',rendered)
+        self.assertNotIn('Execution:',rendered)
+        self.assertNotIn('source quotation:',rendered)
+        body,sources=rendered.split('\n\nSources:\n')
+        self.assertNotIn('https://',body)
+        self.assertEqual(sources.count('synthetic-corpus.pdf'),1)
+        self.assertEqual(sources.count('https://example.test/report.pdf'),1)
+        self.assertEqual(json.dumps(corpus_cli._json_value(answer),sort_keys=True),original)
+        self.assertEqual({ref for claim in answer.claims for ref in claim.evidence_refs},
+            {citation.ref for citation in answer.citations})
+
+    def test_simple_numeric_forecast_is_explicit_and_unknown_scope_is_not_inferred(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-revenue',))
+        claim=replace(answer.claims[0],values={**answer.claims[0].values,'kind':'broker_forecast','scope':None})
+        answer=replace(answer,claims=(claim,))
+        rendered=corpus_cli.render_answer(answer)
+        self.assertIn('net sales (broker forecast)',rendered)
+        self.assertIn('INR 1200.00000000000000000000 million',rendered)
+        self.assertNotIn('consolidated',rendered)
+        self.assertNotIn('actual',rendered)
+        self.assertNotIn('Original source labels',rendered)
+        self.assertIn('Original source labels',corpus_cli.render_answer(answer,diagnostics=True))
+
+    def test_cli_diagnostics_is_explicit_and_keeps_source_labels(self):
+        inference=FakeInference(plan(),decision())
+        inference.close=Mock()
+        with patch.object(corpus_cli,'create_inference',return_value=inference):
+            code,text=self.capture('--mode','fixture','--diagnostics','ask',
+                'What was Example Pharma revenue in 1QFY27?')
+        self.assertEqual(code,0)
+        self.assertIn('Execution:',text)
+        self.assertIn('Original source labels',text)
+
+    def test_table_snapshot_is_preserved_with_other_requested_same_company_metric(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),
+            ('example-revenue','example-growth'))
+        row_text='Net Sales 900 1,000 1,100 1,200'
+        row=replace(answer.claims[0],values={**answer.claims[0].values,
+            'quote':row_text,'value_text':None})
+        answer=replace(answer,claims=(row,answer.claims[1]))
+        original=json.dumps(corpus_cli._json_value(answer),sort_keys=True)
+        rendered=corpus_cli.render_answer(answer)
+        self.assertIn(row_text,rendered)
+        self.assertIn(answer.claims[1].values['quote'],rendered)
+        self.assertIn(row_text,corpus_cli.render_answer(answer,diagnostics=True))
+        self.assertEqual(json.dumps(corpus_cli._json_value(answer),sort_keys=True),original)
+        self.assertIn('Sources:',rendered)
+
+        # Its own only answer, or a different company's only answer, survives.
+        row_answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-revenue',))
+        self.assertIn(row_text,corpus_cli.render_answer(replace(row_answer,claims=(row,))))
+        other_row=replace(row,values={**row.values,'company':'Other Example'})
+        self.assertIn('Other Example: '+row_text,
+            corpus_cli.render_answer(replace(answer,claims=(other_row,answer.claims[1]))))
+
+    def test_numerical_prose_and_margin_conditions_remain_complete(self):
+        prose=('Margins were 21% in 1Q and 23% in 2Q. Further price hikes remain '
+            'under evaluation, and costs ease only if geopolitical conditions stabilize.')
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-growth',))
+        claim=replace(answer.claims[0],values={**answer.claims[0].values,
+            'metric':'margin_outlook','quote':prose})
+        rendered=corpus_cli.render_answer(replace(answer,claims=(claim,)))
+        self.assertIn('Margins were 21% in 1Q and 23% in 2Q.',rendered)
+        self.assertIn('costs ease only if geopolitical conditions stabilize.',rendered)
+        self.assertIn(prose,rendered)
 
 
 if __name__=='__main__':unittest.main()
