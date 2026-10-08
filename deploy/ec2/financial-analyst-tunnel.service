@@ -1,0 +1,25 @@
+[Unit]
+Description=Temporary HTTPS tunnel for private financial analyst
+Wants=network-online.target
+Requires=financial-analyst.service
+After=network-online.target financial-analyst.service
+
+[Service]
+Type=simple
+User=financial-analyst
+Group=financial-analyst
+Environment=HOME=/var/lib/financial-analyst-tunnel
+StateDirectory=financial-analyst-tunnel
+StateDirectoryMode=0700
+ExecStart=/usr/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8765
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

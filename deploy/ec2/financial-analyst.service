@@ -1,0 +1,27 @@
+[Unit]
+Description=Private financial document analyst
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=financial-analyst
+Group=financial-analyst
+WorkingDirectory=/opt/financial-analyst/app
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+EnvironmentFile=/opt/financial-analyst/private/browser.env
+ExecStart=/opt/financial-analyst/venv/bin/python -m financial_analyst.web --config /opt/financial-analyst/private/config.json --port 8765
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=180
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadOnlyPaths=/opt/financial-analyst
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target
