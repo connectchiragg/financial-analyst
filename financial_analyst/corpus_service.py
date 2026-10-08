@@ -87,6 +87,19 @@ class CorpusService:
         return analytical[0]
 
     @staticmethod
+    def _calculation_claim(kind, result, *facts, rank=None):
+        """Keep the reviewed source scale next to normalized arithmetic."""
+        values = asdict(result)
+        values['source_inputs'] = tuple({
+            'fact_id': fact.fact_id, 'period': fact.period, 'kind': fact.kind,
+            'currency': fact.currency, 'unit': fact.unit,
+            'value_text': fact.value_text,
+        } for fact in facts)
+        if rank is not None:
+            values['rank'] = rank
+        return Claim(kind, values, result.evidence_refs)
+
+    @staticmethod
     def _prior_period(period):
         from re import fullmatch
         match = fullmatch(r'([1-4]Q)?FY(\d{2}|\d{4})', period or '')
@@ -101,14 +114,14 @@ class CorpusService:
             estimate = self._one(company, period, metric, 'broker_estimate', **context)
             if actual.currency and actual.unit in {'million', 'billion'}:
                 result = compare_amounts(actual, estimate)
-                claims = [Claim('metric_comparison', asdict(result), result.evidence_refs)]
+                claims = [self._calculation_claim('metric_comparison', result, actual, estimate)]
             else:
                 result = metric_change(actual, estimate, comparison='estimate')
-                claims = [Claim('metric_estimate_change', asdict(result), result.evidence_refs)]
+                claims = [self._calculation_claim('metric_estimate_change', result, actual, estimate)]
             if include_yoy:
                 prior = self._one(company, self._prior_period(period), metric, 'reported_actual', **context)
                 growth = metric_change(actual, prior, comparison='yoy')
-                claims.append(Claim('metric_yoy_change', asdict(growth), growth.evidence_refs))
+                claims.append(self._calculation_claim('metric_yoy_change', growth, actual, prior))
             return Answer('answered', tuple(claims), citations=self._citations(claims), execution=self._execution())
         except (CorpusError, CalculationError, ValueError) as error:
             return self.refuse(str(error), used=True)
@@ -119,7 +132,7 @@ class CorpusService:
             actual = self._one(company, period, metric, 'reported_actual', **context)
             prior = self._one(company, self._prior_period(period), metric, 'reported_actual', **context)
             growth = metric_change(actual, prior, comparison='yoy')
-            claims = (Claim('metric_yoy_change', asdict(growth), growth.evidence_refs),)
+            claims = (self._calculation_claim('metric_yoy_change', growth, actual, prior),)
             return Answer('answered', claims, citations=self._citations(claims), execution=self._execution())
         except (CorpusError, CalculationError, ValueError) as error:
             return self.refuse(str(error), used=True)
@@ -131,8 +144,10 @@ class CorpusService:
                            self._one(company, self._prior_period(period), 'net_sales', 'reported_actual', **context))
                           for company in companies)
             ranked = rank_revenue_growth(pairs, companies)
-            claims = tuple(Claim('ranked_revenue_yoy', {'rank': row.rank, **asdict(row.growth)},
-                                 row.growth.evidence_refs) for row in ranked)
+            by_id = {fact.fact_id: fact for pair in pairs for fact in pair}
+            claims = tuple(self._calculation_claim('ranked_revenue_yoy', row.growth,
+                *(by_id[fact_id] for fact_id in row.growth.fact_ids), rank=row.rank)
+                for row in ranked)
             return Answer('answered', claims, citations=self._citations(claims), execution=self._execution())
         except (CorpusError, CalculationError, ValueError) as error:
             return self.refuse(str(error), used=True)

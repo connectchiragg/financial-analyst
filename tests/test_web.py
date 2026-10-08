@@ -82,7 +82,8 @@ class BrowserHTTPTests(unittest.TestCase):
         status,_,body=self.request(body=json.dumps({'question':'unsupported'}))
         self.assertEqual(status,200)
         self.assertEqual(json.loads(body)['status'],'refused')
-        self.assertIn('Unable to answer:',json.loads(body)['answer'])
+        self.assertEqual(json.loads(body)['answer'],"I'm sorry, I don't have an answer to that from these documents.")
+        self.assertNotIn('Synthetic evidence',json.loads(body)['answer'])
 
     def test_page_health_no_files_no_cors_and_safe_browser_rendering(self):
         for path in ('/','/health','/private.env','/.local/analyst.sqlite','/../private.env'):

@@ -102,6 +102,14 @@ class CorpusCLITests(unittest.TestCase):
         self.assertNotIn('Source provenance:',rendered)
         self.assertIn('Sources:',rendered)
 
+    def test_plain_refusal_is_friendly_and_diagnostics_keep_the_reason(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.refuse('Synthetic missing-context diagnostic.',used=False)
+        self.assertEqual(corpus_cli.render_answer(answer),
+            "I'm sorry, I don't have an answer to that from these documents.")
+        self.assertIn('Synthetic missing-context diagnostic.',
+            corpus_cli.render_answer(answer,diagnostics=True))
+
     def test_corpus_engine_and_mode_are_explicit_and_no_unknown_engine_falls_back(self):
         self.config_path.write_text(json.dumps({'engine':'corpus','mode':'fixture',
             'proof_pack':self.config['proof_pack'].name,'catalog':self.config['catalog'].name,
@@ -206,6 +214,16 @@ class CorpusCLITests(unittest.TestCase):
         self.assertIn('Per-share calculations are rounded to two decimals',rendered)
         self.assertNotIn('Calculated percentages',rendered)
         self.assertNotIn('net sales',rendered)
+
+    def test_printed_growth_is_labeled_as_source_reported(self):
+        service=corpus_cli.build_service(self.config,'fixture')
+        answer=service.lookup(FactFilter(companies=('Example Pharma',)),('example-growth',))
+        claim=replace(answer.claims[0],values={**answer.claims[0].values,
+            'quote':None,'metric':'revenue_yoy_growth','kind':'source_reported_growth',
+            'value_text':'23.4','unit':'percent','currency':None})
+        text=corpus_cli.render_answer(replace(answer,claims=(claim,)))
+        self.assertIn('revenue yoy growth (source reported) 23.4 percent',text)
+        self.assertNotIn('(actual)',text)
 
     def test_simple_margin_display_retains_full_quote_cross_sentence_conditions_and_answer(self):
         service=corpus_cli.build_service(self.config,'fixture')

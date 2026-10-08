@@ -196,7 +196,7 @@ def _source_list(answer):
 def render_answer(answer,*,diagnostics=False):
     """Plain canonical answers; detailed execution remains an opt-in view."""
     if diagnostics:return render_diagnostic_answer(answer)
-    if answer.status!='answered':return 'Unable to answer: '+str(answer.reason)
+    if answer.status!='answered':return "I'm sorry, I don't have an answer to that from these documents."
     lines=[]
     multiple_companies=len({claim.values['company']for claim in answer.claims})>1
     for claim in answer.claims:
@@ -209,7 +209,9 @@ def render_answer(answer,*,diagnostics=False):
                 lines.append((value['company']+': ' if multiple_companies else '')+quote)
             else:
                 status={'reported_actual':'actual','broker_estimate':'broker estimate',
-                        'broker_forecast':'broker forecast'}.get(value.get('kind'))
+                        'broker_forecast':'broker forecast',
+                        'source_reported_growth':'source reported',
+                        'broker_valuation':'broker valuation'}.get(value.get('kind'))
                 amount=' '.join(str(value[key])for key in ('currency','value_text','unit') if value.get(key)is not None)
                 label=metric+(' ('+status+')' if status else '')
                 lines.append(f'{context}: {label} {amount}.')
@@ -248,6 +250,18 @@ def render_answer(answer,*,diagnostics=False):
                 lines.append('These calculations match the printed values; accounting scope is unspecified.')
             else:raise ValueError('Unknown source reconciliation status cannot be rendered.')
         else:raise ValueError('Unknown canonical claim cannot be rendered.')
+        source_inputs=value.get('source_inputs',())
+        if any(source['unit']=='billion' for source in source_inputs):
+            roles={'reported_actual':'actual','broker_estimate':'broker estimate'}
+            originals=[]
+            for source in source_inputs:
+                role=roles.get(source['kind'],source['kind'])
+                if source['kind']=='reported_actual' and source['period']!=value['period']:
+                    role='prior actual'
+                originals.append(' '.join(str(part) for part in
+                    (source['period'],role,source['currency'],source['value_text'],source['unit'])
+                    if part is not None))
+            lines.append(context+': original source inputs: '+'; '.join(originals)+'.')
     return '\n\n'.join((*lines,_source_list(answer)))
 
 

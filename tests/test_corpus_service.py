@@ -74,6 +74,25 @@ class CorpusServiceTests(unittest.TestCase):
         self.assertTrue(answer.execution['no_llm'])
         self.assertEqual(answer.execution['analytics'],'test_double')
 
+    def test_original_source_values_and_units_survive_normalized_calculations(self):
+        from financial_analyst.corpus_cli import render_answer
+        actual = replace(self.actual, value_text='1.250', unit='billion')
+        estimate = replace(self.estimate, value_text='1.0', unit='billion')
+        prior = replace(self.prior, value_text='0.750', unit='billion')
+        service = CorpusService(ReviewedMemoryAdapter(self.validator,(actual,estimate,prior)))
+        answer = service.compare('Example Pharma','1QFY27',include_yoy=True)
+        self.assertEqual(answer.status,'answered')
+        self.assertEqual(answer.claims[0].values['actual_millions'],Decimal('1250'))
+        self.assertEqual(answer.claims[0].values['source_inputs'][0]['value_text'],'1.250')
+        text = render_answer(answer)
+        for original in ('1.250 billion','1.0 billion','0.750 billion'):
+            self.assertIn(original,text)
+        self.assertIn('1,250 million',text)
+        self.assertIn('1QFY26 prior actual',text)
+        self.assertIn('Example Pharma 1QFY27 consolidated: original source inputs:',text)
+        self.assertEqual({ref for claim in answer.claims for ref in claim.evidence_refs},
+                         {citation.ref for citation in answer.citations})
+
     def test_complete_question_refuses_if_yoy_input_is_missing(self):
         self.adapter.facts = (self.actual,self.estimate)
         answer = self.service.compare('Example Pharma','1QFY27',include_yoy=True)
