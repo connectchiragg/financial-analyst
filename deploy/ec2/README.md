@@ -44,7 +44,20 @@ sudo install -m 0644 /opt/financial-analyst/deploy/financial-analyst.service /et
 sudo install -m 0644 /opt/financial-analyst/deploy/financial-analyst-tunnel.service /etc/systemd/system/financial-analyst-tunnel.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now financial-analyst.service
-curl --fail http://127.0.0.1:8765/health
+# Source authentication and model-library imports need time on a small instance.
+# An active process alone does not establish HTTP readiness.
+ready=false
+for attempt in $(seq 1 180); do
+  if curl --silent --fail --max-time 2 http://127.0.0.1:8765/health; then
+    ready=true
+    break
+  fi
+  if ! sudo systemctl is-active --quiet financial-analyst.service; then
+    break
+  fi
+  sleep 1
+done
+test "$ready" = true || exit 1
 sudo systemctl enable --now financial-analyst-tunnel.service
 sudo journalctl -u financial-analyst-tunnel.service --since '5 minutes ago' --no-pager
 ```
@@ -55,6 +68,8 @@ Quick tunnels have no uptime guarantee and their hostname changes every time a n
 
 ## Acceptance before sharing
 
-Check the public page, unauthorized `/ask` rejection, and at least one authenticated factual answer, one calculation, one qualitative answer, and one genuine refusal through the public URL. Inspect the exact source values, context, calculation and bottom citations. Use the real configured inference provider, rather than fixture responses. Verify both services recover after an EC2 restart, obtain the changed tunnel URL, and repeat an authenticated answer. Confirm the public URL remains usable when the laptop server and tunnel are stopped. A successful health response alone does not verify model access, answers, or source integrity.
+Check the public page, unauthorized `/ask` rejection, and at least one authenticated factual answer, one calculation, one qualitative answer, and one genuine refusal through the public URL. Inspect the exact source values, context, calculation and bottom citations. Use the real configured inference provider, rather than fixture responses. Restart the analyst and tunnel services, wait for HTTP readiness, obtain the changed tunnel URL, and repeat an authenticated answer. Confirm the public URL remains usable when the laptop server and tunnel are stopped. A successful health response alone does not verify model access, answers, or source integrity.
+
+On a shared instance, leave other applications and their processes alone. A service restart does not establish whole-instance reboot recovery. Verify boot enablement separately; test an EC2 reboot only on a dedicated instance or during an explicitly authorized maintenance window, and report it as unverified until that check is performed.
 
 Only after those checks pass should the old laptop link be replaced. Record the exact deployed code revision, configured provider/model, test results and new URL in private progress notes. This service remains one active answer request at a time; it is not a high-volume production deployment.
