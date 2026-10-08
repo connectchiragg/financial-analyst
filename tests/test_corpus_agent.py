@@ -9,7 +9,7 @@ import unittest
 from unittest.mock import patch
 
 from financial_analyst.corpus_adapter import CorpusError, ReviewedCorpusAdapter
-from financial_analyst.corpus_agent import CorpusToolAgent, _question_context
+from financial_analyst.corpus_agent import CorpusToolAgent, _company_contexts, _question_context
 from financial_analyst.corpus_service import CorpusService
 from tests.test_agent import FakeInference
 from tests.test_corpus_adapter import create_corpus, create_grouped_corpus
@@ -31,6 +31,12 @@ def decision(ids=('example-revenue',)):
             'selections':[{'call_index':0,'fact_ids':list(ids)}]}
 
 
+def plan_properties(schema,tool='lookup'):
+    item=schema['properties']['requests']['items']
+    return next(variant['properties'] for variant in item['anyOf']
+                if variant['properties']['tool']['enum']==[tool])
+
+
 class CorpusAgentTests(unittest.TestCase):
     def setUp(self):
         self.directory=TemporaryDirectory()
@@ -47,6 +53,157 @@ class CorpusAgentTests(unittest.TestCase):
     def assert_refused(self,answer):
         self.assertEqual(answer.status,'refused')
         self.assertEqual(answer.claims,())
+
+    def use_synthetic_records(self,facts,companies=('Example Pharma',)):
+        memory=ReviewedMemoryAdapter(self.adapter,tuple(facts))
+        memory.sources=tuple({'company':company,'aliases':[],'report_period':'1QFY27',
+            'sector':'Synthetic','agency':'Synthetic'} for company in companies)
+        memory.companies=lambda sector=None:tuple(companies)
+        self.service=CorpusService(memory)
+
+    def test_collective_company_qualifiers_cannot_answer_with_a_wrong_member_context(self):
+        actual,_=self.adapter.read_facts()
+        other=replace(actual,fact_id='other-revenue',company='Other Company')
+        first=replace(actual,scope='standalone')
+        self.use_synthetic_records((first,other),('Example Pharma','Other Company'))
+        item=request();item['companies']=['Example Pharma','Other Company']
+        questions=(
+            'Give Example Pharma and Other Company consolidated revenue in INR for 1QFY27.',
+            'Give consolidated revenue in INR for Example Pharma and Other Company for 1QFY27.',
+            'Give Example Pharma and Other Company revenue forecasts for 1QFY27.',
+            'Give annual revenue for Example Pharma and Other Company.',
+            'Give Example Pharma and Other Company consolidated revenue in INR for 1QFY27; do not substitute standalone figures.')
+        for question in questions:
+            with self.subTest(question=question):
+                answer,_=self.run_agent(plan(item),decision(('example-revenue','other-revenue')),question=question)
+                self.assert_refused(answer)
+        for question in questions[:2]:
+            contexts=_company_contexts(question,self.service.adapter.sources,self.service.adapter.companies())
+            self.assertTrue(all(context['scope']=={'consolidated'} for context in contexts.values()))
+            self.assertTrue(all(context['currency']=={'INR'} for context in contexts.values()))
+
+    def test_separate_company_clauses_keep_their_own_scope(self):
+        actual,_=self.adapter.read_facts()
+        first=replace(actual,scope='standalone')
+        other=replace(actual,fact_id='other-revenue',company='Other Company',scope='consolidated')
+        self.use_synthetic_records((first,other),('Example Pharma','Other Company'))
+        item=request();item['companies']=['Example Pharma','Other Company']
+        answer,inference=self.run_agent(plan(item),decision(('example-revenue','other-revenue')),
+            question='Give Example Pharma standalone revenue alongside Other Company consolidated revenue for 1QFY27.')
+        self.assertEqual(answer.status,'answered')
+        self.assertEqual({claim.values['company']:claim.values['scope'] for claim in answer.claims},
+            {'Example Pharma':'standalone','Other Company':'consolidated'})
+        payload=json.loads(inference.calls[1].messages[1].content)
+        self.assertEqual(payload['company_contexts']['Example Pharma']['scope'],['standalone'])
+        self.assertEqual(payload['company_contexts']['Other Company']['scope'],['consolidated'])
+
+    def test_negated_decimal_caution_cannot_create_positive_scope_or_status(self):
+        answer,_=self.run_agent(plan(),decision(),question=
+            'Show Example Pharma consolidated revenue for 1QFY27; do not include the 1.5% forecast or invent standalone scope.')
+        self.assertEqual(answer.status,'answered')
+
+    def test_calculator_prior_operand_cannot_replace_requested_target_period(self):
+        actual,_=self.adapter.read_facts()
+        actual=replace(actual,value_text='120')
+        prior=replace(actual,fact_id='prior',period='1QFY26',value_text='80')
+        self.use_synthetic_records((actual,prior))
+        item=request();item['tool']='yoy'
+        answer,inference=self.run_agent(plan(item),decision(()),
+            question="Calculate Example Pharma's revenue YoY growth for 1QFY26.")
+        self.assert_refused(answer)
+        self.assertEqual(len(inference.calls),1)
+        self.assertEqual(answer.execution['agent']['local_tool_calls'],0)
+        accepted,_=self.run_agent(plan(item),decision(()),
+            question='Calculate Example Pharma revenue YoY growth for 1QFY27 versus 1QFY26.')
+        self.assertEqual(accepted.status,'answered')
+        self.assertEqual(accepted.claims[0].values['period'],'1QFY27')
+        self.assertEqual(accepted.claims[0].values['reference_period'],'1QFY26')
+
+    def test_lookup_wire_context_does_not_drop_mixed_status_or_unknown_quotes(self):
+        actual,quote=self.adapter.read_facts()
+        margin=replace(actual,fact_id='margin',metric='ebitda_margin',unit='percent',currency=None,value_text='20')
+        growth=replace(actual,fact_id='reported-growth',metric='revenue_yoy_growth',unit='percent',
+            currency=None,kind='source_reported_growth',value_text='5')
+        self.use_synthetic_records((margin,growth,quote))
+        item=request();item['metrics']=['ebitda_margin','revenue_yoy_growth']
+        answer,inference=self.run_agent(plan(item),decision(('margin','reported-growth')),
+            question='Show Example Pharma EBITDA margin and source-reported revenue YoY growth for 1QFY27.')
+        self.assertEqual(answer.status,'answered')
+        fields=plan_properties(inference.calls[0].schema)
+        for field in ('scope','kind','currency','unit'):
+            self.assertEqual(fields[field]['enum'],[None])
+        self.assertEqual({claim.values['kind'] for claim in answer.claims},
+            {'reported_actual','source_reported_growth'})
+        mixed=request();mixed['metrics']=['ebitda_margin','revenue_growth_reason']
+        accepted,_=self.run_agent(plan(mixed),decision(('margin','example-growth')),
+            question='Show Example Pharma consolidated EBITDA margin and explain revenue growth for 1QFY27.')
+        self.assertEqual(accepted.status,'answered')
+        self.assertIsNone(next(claim for claim in accepted.claims if claim.values['fact_id']=='example-growth').values['scope'])
+
+    def test_source_reported_growth_cannot_replace_separately_requested_revenue_amount(self):
+        actual,_=self.adapter.read_facts()
+        growth=replace(actual,fact_id='reported-growth',metric='revenue_yoy_growth',unit='percent',
+            currency=None,kind='source_reported_growth',value_text='5')
+        self.use_synthetic_records((actual,growth))
+        item=request();item['metrics']=['revenue_yoy_growth']
+        question='Show Example Pharma revenue amount and separately printed revenue YoY growth for 1QFY27.'
+        answer,_=self.run_agent(plan(item),decision(('reported-growth',)),question=question)
+        self.assert_refused(answer)
+        item['metrics']=['net_sales','revenue_yoy_growth']
+        accepted,_=self.run_agent(plan(item),decision(('example-revenue','reported-growth')),question=question)
+        self.assertEqual(accepted.status,'answered')
+
+    def test_source_snapshot_availability_is_explicit_to_both_model_stages(self):
+        answer,inference=self.run_agent(plan(),decision())
+        self.assertEqual(answer.status,'answered')
+        for call in inference.calls:
+            payload=json.loads(call.messages[1].content)
+            self.assertFalse(payload['source_availability']['live_market_data'])
+            self.assertIsNone(payload['source_availability']['source_as_of'])
+            self.assertIn('not_live_quote',payload['source_availability']['price_semantics'])
+            self.assertIn('live',call.messages[0].content)
+
+    def test_calculation_wire_enums_exclude_factual_only_unknown_scope_company(self):
+        actual,_=self.adapter.read_facts()
+        actual=replace(actual,scope='standalone',value_text='120')
+        estimate=replace(actual,fact_id='estimate',kind='broker_estimate',value_text='100')
+        prior=replace(actual,fact_id='prior',period='1QFY26',value_text='80')
+        factual=replace(actual,fact_id='other-revenue',company='Other Company',scope=None,
+            review={**actual.review,'capabilities':['source_statement']})
+        factual_estimate=replace(factual,fact_id='other-estimate',kind='broker_estimate')
+        self.use_synthetic_records((actual,estimate,prior,factual,factual_estimate),
+            ('Example Pharma','Other Company'))
+        item=request();item['companies']=['Example Pharma','Other Company']
+        answer,inference=self.run_agent(plan(item),decision(('example-revenue','estimate','other-revenue','other-estimate')),
+            question='Show Example Pharma standalone revenue actual and estimate alongside Other Company revenue actual and estimate for 1QFY27.')
+        self.assertEqual(answer.status,'answered')
+        for tool in ('compare','yoy'):
+            fields=plan_properties(inference.calls[0].schema,tool)
+            self.assertEqual(fields['companies']['items']['enum'],['Example Pharma'])
+            self.assertEqual(fields['metrics']['items']['enum'],['net_sales'])
+        branches=inference.calls[0].schema['properties']['requests']['items']['anyOf']
+        self.assertNotIn('rank',{branch['properties']['tool']['enum'][0] for branch in branches})
+        lookup=plan_properties(inference.calls[0].schema)
+        self.assertEqual(lookup['companies']['items']['enum'],['Example Pharma','Other Company'])
+        payload=json.loads(inference.calls[0].messages[1].content)
+        self.assertEqual(payload['executable_calculations']['compare'],{'Example Pharma':['net_sales']})
+        other_context=payload['company_metric_contexts']['Other Company']['net_sales']
+        self.assertTrue(other_context['factual_lookup_available'])
+        self.assertTrue(all(context[5] is False for context in other_context['contexts']))
+        self.assertNotIn('source_navigation_excerpts',other_context)
+        self.assertIn('showing those inputs does not require compare',inference.calls[0].messages[0].content)
+        self.assertIn('not cautions',inference.calls[0].messages[0].content)
+        self.assertNotIn('Source lookups may filter',plan_properties(inference.calls[0].schema)['kind']['description'])
+        self.assertNotIn('value_text',json.dumps(payload))
+
+    def test_calculation_tool_absent_when_no_reviewed_analytical_role_pair_exists(self):
+        answer,inference=self.run_agent(plan(),decision())
+        self.assertEqual(answer.status,'answered')
+        branches=inference.calls[0].schema['properties']['requests']['items']['anyOf']
+        tools={branch['properties']['tool']['enum'][0] for branch in branches}
+        self.assertNotIn('compare',tools)
+        self.assertNotIn('yoy',tools)
+        self.assertNotIn('rank',tools)
 
     def test_graph_selects_known_source_fact_and_authenticates_citations(self):
         answer,inference=self.run_agent(plan(),decision())
@@ -206,6 +363,9 @@ class CorpusAgentTests(unittest.TestCase):
         facts=tuple(replace(actual,fact_id=f'synthetic-{index}',company=company,
             metric='total_income' if company=='APL Apollo Tubes' else 'net_sales')
             for index,(company,_) in enumerate(catalog))
+        facts=tuple(record for fact in facts for record in (
+            fact,replace(fact,fact_id=fact.fact_id+'-estimate',kind='broker_estimate'),
+            replace(fact,fact_id=fact.fact_id+'-prior',period='1QFY26')))
         memory=ReviewedMemoryAdapter(self.adapter,facts)
         memory.sources=tuple({'company':company,'aliases':[], 'sector':sector,'report_period':'1QFY27','agency':'Synthetic'}
                              for company,sector in catalog)
@@ -224,7 +384,7 @@ class CorpusAgentTests(unittest.TestCase):
                 self.assertEqual({item['company'] for item in payload['sources']},{canonical})
                 self.assertEqual(set(payload['company_metric_periods']),{canonical})
                 self.assertIn(name,payload['sources'][0]['aliases'])
-                metrics=schema['properties']['requests']['items']['properties']['metrics']['items']['enum']
+                metrics=plan_properties(schema)['metrics']['items']['enum']
                 self.assertNotIn('total_income',metrics)
                 self.assertNotIn('value_text',json.dumps(payload))
                 self.assertNotIn('1,200',json.dumps(payload))
@@ -303,12 +463,14 @@ class CorpusAgentTests(unittest.TestCase):
     def test_planning_schema_uses_unique_metrics_and_canonical_tool_examples(self):
         actual,quote=self.adapter.read_facts()
         bridge=replace(quote,metric='valuation_bridge')
-        memory=ReviewedMemoryAdapter(self.adapter,(actual,bridge))
+        estimate=replace(actual,fact_id='estimate',kind='broker_estimate')
+        prior=replace(actual,fact_id='prior',period='1QFY26')
+        memory=ReviewedMemoryAdapter(self.adapter,(actual,estimate,prior,bridge))
         memory.sources=self.adapter.sources;memory.companies=self.adapter.companies
         self.service=CorpusService(memory)
         answer,inference=self.run_agent(plan(),decision())
         self.assertEqual(answer.status,'answered')
-        properties=inference.calls[0].schema['properties']['requests']['items']['properties']
+        properties=plan_properties(inference.calls[0].schema)
         metrics=properties['metrics']['items']['enum']
         self.assertEqual(metrics.count('valuation_bridge'),1)
         self.assertEqual(len(metrics),len(set(metrics)))
