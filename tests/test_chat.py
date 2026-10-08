@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from financial_analyst.chat import main, run_chat
 from financial_analyst.inference import InferenceResponse
@@ -74,11 +74,16 @@ class ChatTests(unittest.TestCase):
         self.assertEqual(len(inference.calls), 4)
         self.assertEqual(inference.closed, 1)
         self.assertEqual(factory.call_count, 1)
-        self.assertIn("Experimental", output)
-        self.assertIn("Example Pharma, 1QFY27", output)
         self.assertIn("beat by 20 INR million", output)
         self.assertIn("synthetic-report.pdf", output)
-        self.assertIn("Broader corpus analytics is unavailable", output)
+        self.assertIn("Ask a question. Type /quit to exit.", output)
+
+    def test_startup_states_the_actual_company_period_and_metric_coverage(self):
+        code, output, inference, _ = self.invoke(["/quit"])
+        self.assertEqual(code, 0)
+        self.assertIn("Available answers: Example Pharma, 1QFY27", output)
+        self.assertIn("revenue comparison, YoY and cited growth explanations only", output)
+        self.assertFalse(inference.calls)
 
     def test_quit_eof_interrupt_cleanup_without_inference(self):
         for ending in ["/quit", EOFError(), KeyboardInterrupt()]:
@@ -188,6 +193,104 @@ class ChatTests(unittest.TestCase):
         self.assertIn("Database seed provenance: reviewed_fixture", output)
         self.assertIn("beat by 20 INR million", output)
         self.assertEqual(inference.closed, 1)
+
+    def corpus_config(self, mode='live'):
+        from tests.test_corpus_adapter import create_corpus
+        pack, catalog, _, pdf = create_corpus(self.root)
+        config = {'engine': 'corpus', 'mode': mode, 'provider': 'groq',
+                  'proof_pack': pack.name, 'catalog': catalog.name,
+                  'database': 'corpus.sqlite', 'env_file': 'private.env'}
+        self.config_path.write_text(json.dumps(config))
+        return pack, catalog, pdf
+
+    def test_explicit_corpus_config_routes_to_corpus_without_legacy_context(self):
+        pack, catalog, _ = self.corpus_config()
+        output = []
+        with patch('financial_analyst.corpus_cli.run_chat', return_value=0) as corpus, \
+             patch('financial_analyst.chat._service') as legacy_service, \
+             patch('financial_analyst.chat.create_inference') as legacy_provider:
+            code = run_chat(self.config_path, inputs('/quit'), output.append)
+        self.assertEqual(code, 0)
+        legacy_service.assert_not_called()
+        legacy_provider.assert_not_called()
+        routed = corpus.call_args.args[0]
+        self.assertEqual(routed['proof_pack'], pack.resolve())
+        self.assertEqual(routed['catalog'], catalog.resolve())
+        self.assertEqual(routed['database'], (self.root / 'corpus.sqlite').resolve())
+        self.assertEqual(corpus.call_args.kwargs['mode'], 'live')
+        self.assertNotIn('company', routed)
+        self.assertNotIn('fixture', routed)
+
+    def test_corpus_mode_uses_real_sqlite_through_normal_question_entry(self):
+        from financial_analyst.corpus_adapter import import_reviewed, SQLiteCorpusAdapter
+        from tests.test_agent import FakeInference as CorpusInference
+        from tests.test_corpus_agent import plan, decision
+        pack, catalog, _ = self.corpus_config()
+        database = self.root / 'corpus.sqlite'
+        import_reviewed(pack, catalog, database)
+        inference = CorpusInference(plan(), decision())
+        inference.close = Mock()
+        output = []
+        with patch('financial_analyst.corpus_cli.create_inference', return_value=inference), \
+             patch('financial_analyst.corpus_cli.SQLiteCorpusAdapter', wraps=SQLiteCorpusAdapter) as constructor:
+            code = run_chat(self.config_path,
+                            inputs('What was Example Pharma revenue in 1QFY27?', '/quit'), output.append)
+        self.assertEqual(code, 0)
+        constructor.assert_called_once()
+        self.assertEqual(constructor.call_args.args[0], database.resolve())
+        self.assertIn('Available reviewed records: 1 company; 2 metrics.', output)
+        text = '\n'.join(output)
+        self.assertIn('database: sqlite_corpus', text)
+        self.assertIn('Original source labels', text)
+        self.assertIn('reviewed_proof_pack', text)
+        self.assertIn('1200.00000000000000000000', text)
+        self.assertEqual(len(inference.calls), 2)
+        inference.close.assert_called_once()
+
+    def test_corpus_fixture_mode_is_explicit_without_a_sqlite_fallback(self):
+        from tests.test_agent import FakeInference as CorpusInference
+        self.corpus_config('fixture')
+        inference = CorpusInference()
+        inference.close = Mock()
+        output = []
+        with patch('financial_analyst.corpus_cli.create_inference', return_value=inference), \
+             patch('financial_analyst.corpus_cli.SQLiteCorpusAdapter') as sqlite:
+            code = run_chat(self.config_path, inputs('/quit'), output.append)
+        self.assertEqual(code, 0)
+        sqlite.assert_not_called()
+        self.assertFalse((self.root / 'corpus.sqlite').exists())
+        self.assertIn('Execution: fixture; database: none', '\n'.join(output))
+        inference.close.assert_called_once()
+
+    def test_bad_corpus_source_fails_before_either_provider_or_legacy_adapter(self):
+        _, _, pdf = self.corpus_config('fixture')
+        pdf.write_bytes(pdf.read_bytes() + b'tampered')
+        output = []
+        with patch('financial_analyst.corpus_cli.create_inference') as corpus_provider, \
+             patch('financial_analyst.chat.create_inference') as legacy_provider, \
+             patch('financial_analyst.chat._service') as legacy_service:
+            code = run_chat(self.config_path, inputs('/quit'), output.append)
+        self.assertEqual(code, 2)
+        corpus_provider.assert_not_called()
+        legacy_provider.assert_not_called()
+        legacy_service.assert_not_called()
+        self.assertIn('Chat could not start', '\n'.join(output))
+
+    def test_unknown_engine_and_missing_explicit_corpus_engine_are_not_inferred(self):
+        for engine in ('unknown', None):
+            with self.subTest(engine=engine):
+                self.corpus_config('fixture')
+                config = json.loads(self.config_path.read_text())
+                if engine is None:
+                    config.pop('engine')
+                else:
+                    config['engine'] = engine
+                self.config_path.write_text(json.dumps(config))
+                with patch('financial_analyst.corpus_cli.run_chat') as corpus, \
+                     patch('financial_analyst.chat.create_inference') as provider:
+                    self.assertEqual(run_chat(self.config_path, inputs('/quit'), lambda _: None), 2)
+                corpus.assert_not_called()
+                provider.assert_not_called()
 
 
 if __name__ == "__main__":

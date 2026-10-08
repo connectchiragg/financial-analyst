@@ -1,8 +1,39 @@
 # Financial Analyst
 
-A CLI for source-backed revenue comparisons and growth commentary, starting with explicitly reviewed fixtures. It preserves source context, calculates deterministically, cites its evidence, and refuses unsupported answers.
+A CLI for source-backed financial facts, comparisons and commentary. It preserves source context, calculates deterministically, cites its evidence, and refuses unsupported answers.
 
 ## Current status
+
+The question-only `financial_analyst.chat` entry point supports an explicit cross-company `corpus` engine. Its private configuration binds a reviewed proof pack, original-source catalog and SQLite database. Startup shows the companies and metrics actually available; record coverage does not imply every period or analytical operation is supported. The older revenue engine remains bound to one configured company and quarter.
+
+The corpus engine uses LangGraph to plan typed local tools, validate their arguments, execute them, assess whole-question coverage and render canonical evidence. Tools cover source-fact/commentary lookup, compatible metric comparisons and YoY changes, revenue growth rankings, reviewed sector members, and narrowly authenticated printed-table valuation reconciliation. At most four tools and two bounded inference calls execute; model-authored values or prose are not rendered. Provider failures return no claims, with HTTP 429 reported explicitly.
+
+Only explicitly approved source facts enter this engine. Numerical analytics additionally requires complete reviewed period, scope, status, currency and unit context. Unresolved source context remains visible and cannot be inferred by the model. Unknown calendar-year mappings, missing members and incompatible inputs refuse the whole requested calculation. Printed valuation inconsistencies are reported rather than adjusted to match a target. Full metric extraction, general redaction and comprehensive live-query accuracy remain unfinished.
+
+## Cross-company terminal session
+
+Create a private `.local/analyst-config.json` using your own reviewed sources:
+
+```json
+{
+  "engine": "corpus",
+  "mode": "live",
+  "proof_pack": "reviewed-primary-corpus.json",
+  "catalog": "research-manifest.json",
+  "database": "reviewed-corpus.sqlite",
+  "provider": "groq",
+  "model": "openai/gpt-oss-20b",
+  "env_file": "/absolute/path/to/private.env"
+}
+```
+
+```sh
+python -m financial_analyst.corpus_cli --config .local/analyst-config.json ingest
+python -m financial_analyst.corpus_cli --config .local/analyst-config.json coverage
+python -m financial_analyst.chat
+```
+
+The session prompts for a question; `/quit` exits. Original PDFs are required even after ingestion: live reads and final claims reauthenticate the source and canonical database records. `mode: fixture` explicitly uses reviewed in-memory records instead of SQLite. There is no fallback between modes. Source proof packs, databases, credentials and actual report-derived evaluation data belong in ignored private storage; public tests use invented facts and synthetic PDFs.
 
 Quarterly revenue comparison, optional YoY growth and cited growth passages are implemented. Choose fixture analytics or real SQLite reads from a reviewed source bundle. Keyword retrieval and bounded Groq semantic retrieval operate over contextualized evidence. Optional inference selects references through a provider-neutral port; the application returns canonical source quotes and deterministic calculations. A separate experimental LangGraph path plans bounded local revenue-tool calls; it does not establish full cross-company coverage.
 
@@ -171,7 +202,7 @@ Quotes and raw labels must match canonical source passages exactly. Decimal text
 
 Imports reauthenticate the source PDF and canonical passages before a transactional SQLite write. Identical inputs are unchanged; conflicting identities are rejected. The knowledge store uses a separate format from the reviewed analytics database. Provider or evidence failures return exit code `2`, retain only authenticated source passages, and report the failure explicitly. There is no silent fixture fallback or automatic review promotion.
 
-This is an extraction and storage increment. Sensitive-data sanitation/redaction, a review/promotion workflow, corpus-wide semantic indexing and general cross-company analytics remain pending. Live extraction readiness must be verified against the chosen provider; synthetic tests alone do not establish it.
+This is an extraction and storage increment. Sensitive-data sanitation/redaction, an end-user review/promotion workflow and corpus-wide semantic indexing remain pending. The separate corpus engine consumes explicitly approved facts; pending extraction proposals cannot enter it automatically. Live extraction readiness must be verified against the chosen provider; synthetic tests alone do not establish it.
 
 ## Development approach
 
@@ -198,4 +229,4 @@ The graph allows at most two inference calls and one local tool call, with no re
 python -m financial_analyst.chat
 ```
 
-The session reads a private `.local/analyst-config.json` with provider, reviewed fixture, optional SQLite database, company and fiscal period. It prompts for questions repeatedly and prints cited canonical answers. Type `/quit`, send EOF or use Ctrl+C to exit. File paths resolve relative to the config file; absolute paths avoid ambiguity. Provider credentials stay in the configured external environment file, never in the config itself. The configured context remains explicit; this wrapper does not create cross-company support.
+The session reads a private `.local/analyst-config.json` and prompts repeatedly for questions. Type `/quit`, send EOF or use Ctrl+C to exit. File paths resolve relative to the config file. Provider credentials stay in the configured external environment file. An explicit `engine: corpus` selects the cross-company path above. A legacy configuration without that engine uses its reviewed fixture, optional SQLite database, company and fiscal period, and remains limited to that bound context.

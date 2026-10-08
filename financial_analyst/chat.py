@@ -16,7 +16,7 @@ from .service import ApplicationService
 
 DEFAULT_CONFIG = Path(".local/analyst-config.json")
 _ALLOWED = {"provider", "model", "env_file", "fixture", "database", "company", "period", "retrieval",
-            "base_url", "api_key_env"}
+            "base_url", "api_key_env", "engine"}
 
 
 def _unique_keys(pairs):
@@ -31,8 +31,13 @@ def _unique_keys(pairs):
 def _load_config(config_path):
     path = Path(config_path).expanduser().resolve()
     config = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=_unique_keys)
+    if isinstance(config, dict) and config.get("engine") == "corpus":
+        from .corpus_cli import load_config
+        return load_config(path)
     if not isinstance(config, dict) or set(config) - _ALLOWED:
         raise ValueError("Unsupported configuration fields.")
+    if config.get("engine", "legacy") != "legacy":
+        raise ValueError("Unsupported chat engine.")
     for name in ("provider", "fixture", "company", "period"):
         if not isinstance(config.get(name), str) or not config[name].strip():
             raise ValueError("Required configuration is missing.")
@@ -84,6 +89,9 @@ def run_chat(config_path, input_fn=input, output_fn=print) -> int:
     inference = None
     try:
         config = _load_config(config_path)
+        if config.get("engine") == "corpus":
+            from .corpus_cli import run_chat as run_corpus_chat
+            return run_corpus_chat(config, mode=config["mode"], input_fn=input_fn, output_fn=output_fn)
         service = _service(config)
         inference = create_inference(config["provider"], model=config.get("model"),
                                      env_file=config.get("env_file"), base_url=config.get("base_url"),
@@ -106,8 +114,8 @@ def run_chat(config_path, input_fn=input, output_fn=print) -> int:
         return 2
 
     try:
-        output_fn(f"Experimental analyst. Reviewed context: {config['company']}, {config['period']}.")
-        output_fn("Ask a question. Broader corpus analytics is unavailable in this session. Type /quit to exit.")
+        output_fn(f"Available answers: {config['company']}, {config['period']}; revenue comparison, YoY and cited growth explanations only.")
+        output_fn("Ask a question. Type /quit to exit.")
         while True:
             try:
                 question = input_fn("Question: ")

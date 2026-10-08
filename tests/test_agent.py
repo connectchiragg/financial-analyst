@@ -1,4 +1,5 @@
 from decimal import Decimal
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -7,10 +8,10 @@ import unittest
 from unittest.mock import patch
 
 from financial_analyst.adapters import FileFixtureAdapter
-from financial_analyst.agent import ToolPlanningAgent
+from financial_analyst.agent import PLAN_SCHEMA, ToolPlanningAgent, _unsupported_request
 from financial_analyst.inference import InferenceResponse, ProviderError
 from financial_analyst.service import ApplicationService
-from tests.support import create_fixture
+from tests.support import _write_pdf, create_fixture
 
 
 def plan(tool="combined_revenue", **changes):
@@ -73,6 +74,78 @@ class LocalAgentTests(unittest.TestCase):
         self.assertTrue(answer.execution["no_database"])
         payload = json.loads(inference.calls[1].messages[1].content)
         self.assertEqual(payload["claims"][0]["values"]["delta"], "20")
+
+    def test_plan_schema_binds_exact_company_and_period_without_mutating_shared_schema(self):
+        answer,inference=self.run_agent(plan(),{"complete":True,"unsupported_parts":[]})
+        self.assertEqual(answer.status,"answered")
+        schema=inference.calls[0].schema
+        self.assertEqual(schema["properties"]["company"]["enum"],["Example Pharma"])
+        self.assertEqual(schema["properties"]["period"]["enum"],["1QFY27"])
+        self.assertIn("false for growth_commentary",schema["properties"]["include_yoy"]["description"])
+        self.assertIn("requires include_yoy=false",inference.calls[0].messages[0].content)
+        self.assertNotIn("enum",PLAN_SCHEMA["properties"]["company"])
+        self.assertNotIn("enum",PLAN_SCHEMA["properties"]["period"])
+
+    def test_known_gsk_question_alias_uses_canonical_source_binding(self):
+        # The company name resembles an approved alias, but every source page,
+        # value and proof below is synthetic and authenticated locally.
+        import pdfplumber
+        fixture_path=create_fixture(Path(self.directory.name)/"synthetic-gsk")
+        payload=json.loads(fixture_path.read_text())
+        source=Path(payload["source"]["local_path"])
+        with pdfplumber.open(source) as pdf:
+            pages=[[(word["x0"],page.height-word["top"]-7.93,
+                     ("GSK" if word["text"]=="Example" else word["text"])+" ")
+                    for word in page.extract_words()] for page in pdf.pages]
+        _write_pdf(source,pages)
+        payload=json.loads(json.dumps(payload).replace("Example Pharma","GSK Pharma"))
+        payload["source"]["sha256"]=hashlib.sha256(source.read_bytes()).hexdigest()
+        fixture_path.write_text(json.dumps(payload))
+        fixture=FileFixtureAdapter(fixture_path)
+        service=ApplicationService(fixture,fixture,fixture)
+        inference=FakeInference(plan("compare_revenue",company="GSK Pharma"),
+                                {"complete":True,"unsupported_parts":[]})
+        answer=ToolPlanningAgent(inference,service).answer("Compare GSK revenue with the estimate.","GSK Pharma","1QFY27")
+        self.assertEqual(answer.status,"answered")
+        self.assertEqual(answer.comparison.actual.company,"GSK Pharma")
+        self.assertEqual(answer.comparison.delta_millions,Decimal("20"))
+        self.assertEqual(inference.calls[0].schema["properties"]["company"]["enum"],["GSK Pharma"])
+        unsupported=FakeInference(plan(company="GSK Pharma"),{"complete":True,"unsupported_parts":[]})
+        refusal=ToolPlanningAgent(unsupported,service).answer(
+            "What was the revenue for GSK in 2024-2025?","GSK Pharma","1QFY27")
+        self.assert_refused(refusal,0,0)
+        self.assertEqual(unsupported.calls,[])
+        self.assertIn("GSK Pharma / 1QFY27",refusal.reason)
+
+    def test_context_mismatch_refusal_names_expected_context_without_provider_values(self):
+        for response,category in ((plan(company="SECRET_PROVIDER_VALUE"),"configured company"),
+                (plan(period="SECRET_PROVIDER_VALUE"),"configured fiscal quarter")):
+            with self.subTest(category=category):
+                answer,_=self.run_agent(response)
+                self.assert_refused(answer,1,0)
+                self.assertIn(category,answer.reason)
+                self.assertIn("Example Pharma / 1QFY27",answer.reason)
+                self.assertNotIn("SECRET_PROVIDER_VALUE",answer.reason)
+
+    def test_calendar_year_and_range_queries_refuse_before_forcing_bound_plan(self):
+        for time in ("2024-2025","2024–25","2024/2025","2024 to 2025","2024 through 2025","2024"):
+            with self.subTest(time=time):
+                answer,inference=self.run_agent(plan(),{"complete":True,"unsupported_parts":[]},
+                    question=f"What was the revenue for Example Pharma in {time}?")
+                self.assert_refused(answer,0,0)
+                self.assertEqual(inference.calls,[])
+                self.assertIn("Example Pharma / 1QFY27",answer.reason)
+                self.assertIn("annual/year-range answers are unavailable",answer.reason)
+        self.assertIn("GSK Pharma / 1QFY27",_unsupported_request(
+            "What was the revenue for GSK in 2024-2025?","GSK Pharma","1QFY27"))
+
+    def test_explicit_four_digit_fiscal_quarters_and_prior_yoy_are_not_calendar_years(self):
+        for question in ("Compare revenue in 1QFY2027 with the estimate",
+                "Compare revenue in 1Q FY2027 with the estimate",
+                "Compare revenue in Q1 FY2027 with the estimate",
+                "Compare revenue YoY in 1QFY2027 versus 1QFY2026"):
+            with self.subTest(question=question):
+                self.assertIsNone(_unsupported_request(question,"Example Pharma","1QFY2027"))
 
     def test_each_allowlisted_tool_runs_once(self):
         for tool, expected in [("compare_revenue", {"comparison"}), ("growth_commentary", {"growth"}), ("combined_revenue", {"comparison", "growth"})]:
