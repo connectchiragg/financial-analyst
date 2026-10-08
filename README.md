@@ -234,3 +234,20 @@ The session reads a private `.local/analyst-config.json` and prompts repeatedly 
 Corpus answers display readable source statements or deterministic calculations, with citations at the bottom. Use `python -m financial_analyst.chat --diagnostics` for execution, provider, database and provenance details. JSON output retains the full audit data.
 
 OpenRouter can use the existing `openai-compatible` adapter: set `base_url` to `https://openrouter.ai/api/v1`, an explicit supported `model`, `api_key_env` to `OPENROUTER_API_KEY`, and `env_file` to a private credential file in the session configuration. Choose that configuration with `--config`; providers are never switched automatically. Successful authentication alone does not establish answer coverage.
+
+
+## Temporary browser testing
+
+The protected browser entry point uses the same reviewed corpus, inference adapter and source validation as the CLI. Set `FINANCIAL_ANALYST_ACCESS_CODE` to a private random access code and run:
+
+```sh
+python -m financial_analyst.web --config .local/openrouter-config.json --port 8765
+```
+
+The server binds to `127.0.0.1`. A temporary tunnel can make it reachable:
+
+```sh
+cloudflared tunnel --url http://127.0.0.1:8765 --no-autoupdate
+```
+
+Enter the access code and a question in the browser. The browser sends the code as an authorization header; it does not store it or put it in the URL. Reports and the SQLite database remain local. The link works only while the server, tunnel and Mac are running. This is a bounded test service, with one active answer request at a time; it does not establish production availability or full question coverage. Homebrew distribution is a separate CLI packaging task.
